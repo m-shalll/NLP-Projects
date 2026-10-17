@@ -75,4 +75,68 @@ print("Label:", y_train[positive_index])
 print(X_train[positive_index])
 
 
+# %% [markdown]
+# # Part 1.1: Processing and tokenization
+
 # %%
+import re
+import html
+
+def clean_text(text):
+    # Decode HTML entities, e.g. &amp; -> &
+    text = html.unescape(text)
+
+    # Remove HTML tags, e.g. <br /> and <div>
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    # Convert to lowercase
+    text = text.lower()
+
+    # Normalize whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+def tokenize(text):
+     # Keep words, contractions, numbers, and individual punctuation marks
+    tokens = re.findall(
+        r"[a-z]+(?:'[a-z]+)*|[0-9]+|[^\w\s]",
+        text
+    )
+    return tokens
+
+def process_review(text):
+    cleaned_text = clean_text(text)
+    tokens = ["<s>"] + tokenize(cleaned_text) + ["</s>"]
+    return tokens
+
+X_train_tokens = [process_review(review) for review in X_train]
+X_test_tokens = [process_review(review) for review in X_test]
+
+
+
+# %% [markdown]
+# # Part 1.2: Class-Conditional Language Models
+
+# %%
+negative_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 0]
+positive_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 1]
+
+from collections import defaultdict
+
+def count_bigrams(reviews):
+    bigram_counts = defaultdict(int)
+    context_counts = defaultdict(int)
+
+    for tokens in reviews:
+        for i in range(len(tokens) -1):
+            prev_token = tokens[i]
+            next_token = tokens[i + 1]
+            bigram_counts[(prev_token, next_token)] += 1
+            context_counts[prev_token] += 1
+
+    return bigram_counts, context_counts
+
+positive_bigram_counts, positive_context_counts = count_bigrams(positive_reviews)
+negative_bigram_counts, negative_context_counts = count_bigrams(negative_reviews)
+
