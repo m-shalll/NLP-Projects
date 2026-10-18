@@ -19,7 +19,7 @@
 #
 
 # %%
-from collections import Counter, defaultdict
+from collections import defaultdict
 import html
 import re
 
@@ -111,11 +111,6 @@ X_test_tokens = [process_review(review) for review in X_test]
 print("Example tokens:", X_train_tokens[0][:40])
 
 
-def map_unknown_tokens(tokens, vocab):
-    # Map words absent from the training vocabulary to the unknown-token bucket.
-    return [token if token in vocab else "<UNK>" for token in tokens]
-
-
 # %% [markdown]
 # # Class-Conditional Bigram Language Models
 #
@@ -147,13 +142,10 @@ class BigramModel:
         return (bigram_count + 1) / (context_count + self.vocab_size)  # Laplace smoothing
 
 
-token_frequencies = Counter(token for tokens in X_train_tokens for token in tokens)
-lm_vocab = {token for token, count in token_frequencies.items() if count >= 2}
-lm_vocab.update({"<UNK>", "<s>", "</s>"})
-X_train_tokens = [map_unknown_tokens(tokens, lm_vocab) for tokens in X_train_tokens]
-
 negative_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 0]
 positive_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 1]
+lm_vocab = {token for tokens in X_train_tokens for token in tokens}
+lm_vocab.add("<UNK>")
 
 positive_bigram_counts, positive_context_counts = count_bigrams(positive_reviews)
 negative_bigram_counts, negative_context_counts = count_bigrams(negative_reviews)
@@ -167,6 +159,11 @@ print("Language-model vocabulary size:", len(lm_vocab))
 #
 
 # %%
+def map_unknown_tokens(tokens, vocab):
+    # Map words absent from the training vocabulary to the unknown-token bucket.
+    return [token if token in vocab else "<UNK>" for token in tokens]
+
+
 def calculate_ll_and_perplexity(tokens, model, vocab):
     tokens = map_unknown_tokens(tokens, vocab)
     n_bigrams = len(tokens) - 1
@@ -279,6 +276,8 @@ print(
 
 # %%
 from collections import Counter
+
+train_features = []
 #remove '<s>' and '</s>'(as we only want useful words)
 reviews_naive= [tokens[1:-1] for tokens in X_train_tokens]
 
@@ -288,9 +287,17 @@ bigram_counts_naive, _ = count_bigrams(reviews_naive)
 #count unigrams 
 unigram_counts_naive = Counter() #used counter to easliy get top 2000
 for tokens in reviews_naive:
-    for wrd in tokens:
-        unigram_counts_naive[wrd] += 1
+    unigrams = []
 
+    for wrd in tokens:
+        unigram = (wrd,)
+        unigram_counts_naive[unigram] += 1
+        unigrams.append(unigram)
+
+    bigrams = list(zip(tokens, tokens[1:]))
+   ## print("Bigrams for review:", bigrams)
+    # Append once per review.
+    train_features.append(unigrams + bigrams)
 #combine both into 1 var        
 feature_counts = Counter(unigram_counts_naive)
 feature_counts.update(bigram_counts_naive)
@@ -303,4 +310,78 @@ vocabulary = {
     feature: index
     for index, (feature, count) in enumerate(top_features_naive)
 }
+
+
+# %% [markdown]
+#     2.2 Counting Probabilites
+
+# %%
+
+
+def class_count():
+   
+    positive_counts = np.zeros(len(vocabulary), dtype=int)
+    negative_counts = np.zeros(len(vocabulary), dtype=int)
+    for features,label in zip(train_features, y_train):
+        for feature in features:
+            if feature in vocabulary:
+                index =vocabulary[feature]
+            if label == 1:
+                positive_counts[index] += 1
+            else:   
+                negative_counts[index] += 1
+            print(f"Feature: {feature}, Label: {label}, Index: {index}, Positive Count: {positive_counts[index]}, Negative Count: {negative_counts[index]}")
+    return positive_counts, negative_counts
+
+def calculate_probabilites():
+    positive_counts, negative_counts = class_count()
+    total_positive=np.sum(positive_counts)
+    total_negative=np.sum(negative_counts)
+    v=len(vocabulary)
+    positive_probabilities = (positive_counts + 1) / (total_positive + v)
+    negative_probabilities = (negative_counts + 1) / (total_negative + v)
+    return positive_probabilities, negative_probabilities
+
+
+# %% [markdown]
+#     2.3 compute Log Ratios
+
+# %%
+def compute_log_ratios():
+    
+    positive_probabilities, negative_probabilities = calculate_probabilites()
+    log_ratios=np.log(positive_probabilities / negative_probabilities)
+    return log_ratios
+
+
+# %% [markdown]
+#     2.4 Naive Bayes Prediction
+
+# %%
+def predict_naive_bayes(X):
+    words = X[1:-1]
+    unigrams = [(word,) for word in words]
+    bigram=list(zip(X,X[1:]))
+    features = unigrams + bigram
+    log_ratios = compute_log_ratios()
+    score = 0.0
+    for feature in features:
+        if feature in vocabulary:
+            index=vocabulary[feature]
+            score+=log_ratios[index]
+    return int(score>0)
+
+
+
+            
+
+
+# %%
+y_pred_nb = []
+for tokens,label in zip(X_test_tokens,y_test):
+    prediction=predict_naive_bayes(tokens)
+    y_pred_nb.append(prediction)
+    
+nb_metrics = classification_metrics(y_test, y_pred_nb)
+print("Naive Bayes:", nb_metrics)
 
