@@ -176,3 +176,17 @@ for bigram in [
     print("Positive:", positive_model.probability(*bigram))
     print("Negative:", negative_model.probability(*bigram))
     print()
+
+# %% [markdown]
+# # Handle Unknown words
+
+# %%
+vocab.add("<UNK>")
+V = len(vocab)
+positive_model = BigramModel(positive_bigram_counts, positive_context_counts, vocab)
+negative_model = BigramModel(negative_bigram_counts, negative_context_counts, vocab)
+
+def map_unknown_tokens(tokens, vocab):
+    return [token if token in vocab else "<UNK>" for token in tokens]
+
+
