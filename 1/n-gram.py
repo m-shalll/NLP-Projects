@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.6
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -320,17 +320,14 @@ vocabulary = {
 
 def class_count():
    
-    positive_counts = np.zeros(len(vocabulary), dtype=int)
-    negative_counts = np.zeros(len(vocabulary), dtype=int)
-    for features,label in zip(train_features, y_train):
-        for feature in features:
-            if feature in vocabulary:
-                index =vocabulary[feature]
-            if label == 1:
-                positive_counts[index] += 1
-            else:   
-                negative_counts[index] += 1
-            print(f"Feature: {feature}, Label: {label}, Index: {index}, Positive Count: {positive_counts[index]}, Negative Count: {negative_counts[index]}")
+    positive_counts = np.zeros(len(vocabulary), dtype=np.int64)
+    negative_counts = np.zeros(len(vocabulary), dtype=np.int64)
+    for features, label in zip(train_features, y_train):
+        counts = positive_counts if label == 1 else negative_counts
+        for f in features:
+            idx = vocabulary.get(f)
+            if idx is not None:
+                counts[idx] += 1
     return positive_counts, negative_counts
 
 def calculate_probabilites():
@@ -352,6 +349,7 @@ def compute_log_ratios():
     positive_probabilities, negative_probabilities = calculate_probabilites()
     log_ratios=np.log(positive_probabilities / negative_probabilities)
     return log_ratios
+log_ratios=compute_log_ratios()
 
 
 # %% [markdown]
@@ -362,8 +360,7 @@ def predict_naive_bayes(X):
     words = X[1:-1]
     unigrams = [(word,) for word in words]
     bigram=list(zip(X,X[1:]))
-    features = unigrams + bigram
-    log_ratios = compute_log_ratios()
+    features = unigrams + bigram 
     score = 0.0
     for feature in features:
         if feature in vocabulary:
@@ -378,8 +375,9 @@ def predict_naive_bayes(X):
 
 # %%
 y_pred_nb = []
+log_ratios = compute_log_ratios()
 for tokens,label in zip(X_test_tokens,y_test):
-    prediction=predict_naive_bayes(tokens)
+    prediction=predict_naive_bayes(tokens,)
     y_pred_nb.append(prediction)
     
 nb_metrics = classification_metrics(y_test, y_pred_nb)
