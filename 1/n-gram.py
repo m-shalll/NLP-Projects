@@ -19,7 +19,7 @@
 #
 
 # %%
-from collections import defaultdict
+from collections import Counter, defaultdict
 import html
 import re
 
@@ -111,6 +111,11 @@ X_test_tokens = [process_review(review) for review in X_test]
 print("Example tokens:", X_train_tokens[0][:40])
 
 
+def map_unknown_tokens(tokens, vocab):
+    # Map words absent from the training vocabulary to the unknown-token bucket.
+    return [token if token in vocab else "<UNK>" for token in tokens]
+
+
 # %% [markdown]
 # # Class-Conditional Bigram Language Models
 #
@@ -142,10 +147,13 @@ class BigramModel:
         return (bigram_count + 1) / (context_count + self.vocab_size)  # Laplace smoothing
 
 
+token_frequencies = Counter(token for tokens in X_train_tokens for token in tokens)
+lm_vocab = {token for token, count in token_frequencies.items() if count >= 2}
+lm_vocab.update({"<UNK>", "<s>", "</s>"})
+X_train_tokens = [map_unknown_tokens(tokens, lm_vocab) for tokens in X_train_tokens]
+
 negative_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 0]
 positive_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 1]
-lm_vocab = {token for tokens in X_train_tokens for token in tokens}
-lm_vocab.add("<UNK>")
 
 positive_bigram_counts, positive_context_counts = count_bigrams(positive_reviews)
 negative_bigram_counts, negative_context_counts = count_bigrams(negative_reviews)
@@ -159,11 +167,6 @@ print("Language-model vocabulary size:", len(lm_vocab))
 #
 
 # %%
-def map_unknown_tokens(tokens, vocab):
-    # Map words absent from the training vocabulary to the unknown-token bucket.
-    return [token if token in vocab else "<UNK>" for token in tokens]
-
-
 def calculate_ll_and_perplexity(tokens, model, vocab):
     tokens = map_unknown_tokens(tokens, vocab)
     n_bigrams = len(tokens) - 1
@@ -266,4 +269,3 @@ print(
     "Generated continuation:",
     predict_next_words("the movie", positive_model, max_length=10),
 )
-
