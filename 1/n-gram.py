@@ -7,9 +7,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.6
+#       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: nlp
+#     display_name: Python 3
 #     language: python
 #     name: python3
 # ---
@@ -17,6 +17,9 @@
 # %% [markdown]
 # # Data Setup and Inspection
 #
+
+# %%
+# %pip install datasets
 
 # %%
 from collections import defaultdict
@@ -266,4 +269,38 @@ print(
     "Generated continuation:",
     predict_next_words("the movie", positive_model, max_length=10),
 )
+
+
+# %% [markdown]
+# ### **Part 2:Vocabulary, Naive Bayes, and Log-Ratios**
+
+# %% [markdown]
+#     2.1 Building the vocabulary
+
+# %%
+from collections import Counter
+#remove '<s>' and '</s>'(as we only want useful words)
+reviews_naive= [tokens[1:-1] for tokens in X_train_tokens]
+
+#count bigrams
+bigram_counts_naive, _ = count_bigrams(reviews_naive)
+
+#count unigrams 
+unigram_counts_naive = Counter() #used counter to easliy get top 2000
+for tokens in reviews_naive:
+    for wrd in tokens:
+        unigram_counts_naive[wrd] += 1
+
+#combine both into 1 var        
+feature_counts = Counter(unigram_counts_naive)
+feature_counts.update(bigram_counts_naive)
+
+#get the top 2000
+top_features_naive=feature_counts.most_common(2000)
+
+# make a vocab dictionary to map each feature to its index
+vocabulary = {
+    feature: index
+    for index, (feature, count) in enumerate(top_features_naive)
+}
 
