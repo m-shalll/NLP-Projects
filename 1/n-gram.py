@@ -76,7 +76,7 @@ print(X_train[positive_index])
 
 
 # %% [markdown]
-# # Part 1.1: Processing and tokenization
+# # Processing and tokenization
 
 # %%
 import re
@@ -116,7 +116,19 @@ X_test_tokens = [process_review(review) for review in X_test]
 
 
 # %% [markdown]
-# # Part 1.2: Class-Conditional Language Models
+# # Build shared vocab
+
+# %%
+vocab = set()
+for tokens in X_train_tokens:
+    vocab.update(tokens)
+
+V = len(vocab)
+
+print (f"Vocabulary size: {V}")
+
+# %% [markdown]
+# # Bigram Model
 
 # %%
 negative_reviews = [tokens for tokens, label in zip(X_train_tokens, y_train) if label == 0]
@@ -140,3 +152,27 @@ def count_bigrams(reviews):
 positive_bigram_counts, positive_context_counts = count_bigrams(positive_reviews)
 negative_bigram_counts, negative_context_counts = count_bigrams(negative_reviews)
 
+class BigramModel:
+    def __init__(self, bigram_counts, context_counts, vocab):
+        self.bigram_counts = bigram_counts
+        self.context_counts = context_counts
+        self.vocab = vocab
+        self.vocab_size = len(vocab)
+
+    def probability(self, prev_word, next_word):
+        bigram_count = self.bigram_counts.get((prev_word, next_word), 0)
+        context_count = self.context_counts.get(prev_word, 0)
+        return (bigram_count + 1) / (context_count + self.vocab_size) # Laplace smoothing
+
+positive_model = BigramModel(positive_bigram_counts, positive_context_counts, vocab)
+negative_model = BigramModel(negative_bigram_counts, negative_context_counts, vocab)
+
+for bigram in [
+    ("<s>", "this"),
+    ("very", "good"),
+    ("very", "bad")
+]:
+    print("Bigram:", bigram)
+    print("Positive:", positive_model.probability(*bigram))
+    print("Negative:", negative_model.probability(*bigram))
+    print()
