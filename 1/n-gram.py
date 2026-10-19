@@ -383,3 +383,263 @@ for tokens,label in zip(X_test_tokens,y_test):
 nb_metrics = classification_metrics(y_test, y_pred_nb)
 print("Naive Bayes:", nb_metrics)
 
+
+# %% [markdown]
+# ## Part 3: NB-Weighted Logistic Regression
+# ### 3.1 Construct NB-weighted feature matrices
+
+# %%
+def extract_feature_counts(tokens, vocabulary):
+    """
+    Extract unigram and bigram counts using the same representation
+    used to construct the Part 2 vocabulary.
+
+    tokens includes <s> and </s>, so remove these first.
+    """
+    words = tokens[1:-1]
+
+    features = [(word,) for word in words]
+    features += list(zip(words, words[1:]))
+
+    counts = np.zeros(len(vocabulary), dtype=np.float64)
+
+    for feature in features:
+        index = vocabulary.get(feature)
+        if index is not None:
+            counts[index] += 1.0
+
+    return counts
+
+
+def build_nb_weighted_matrix(tokenized_reviews, vocabulary, log_ratios):
+    """
+    Build a matrix where each feature count is multiplied
+    by its Naive Bayes log-ratio.
+    """
+    X_counts = np.zeros(
+        (len(tokenized_reviews), len(vocabulary)),
+        dtype=np.float64
+    )
+
+    for i, tokens in enumerate(tokenized_reviews):
+        X_counts[i] = extract_feature_counts(tokens, vocabulary)
+
+    # NB-weight each feature
+    X_weighted = X_counts * log_ratios[np.newaxis, :]
+
+    return X_weighted
+
+
+# Construct the training and test matrices
+X_train_weighted = build_nb_weighted_matrix(
+    X_train_tokens, vocabulary, log_ratios
+)
+
+X_test_weighted = build_nb_weighted_matrix(
+    X_test_tokens, vocabulary, log_ratios
+)
+
+print("Training feature matrix shape:", X_train_weighted.shape)
+print("Testing feature matrix shape:", X_test_weighted.shape)
+
+assert X_train_weighted.shape == (5000, 2000)
+assert X_test_weighted.shape == (1000, 2000)
+assert np.all(np.isfinite(X_train_weighted))
+assert np.all(np.isfinite(X_test_weighted))
+
+
+
+# %% [markdown]
+# ### 3.2 Standardization and bias column
+
+# %%
+# Statistics are learned from the training set only.
+feature_means = np.mean(X_train_weighted, axis=0)
+feature_stds = np.std(X_train_weighted, axis=0)
+
+# Avoid division by zero for constant features.
+feature_stds[feature_stds == 0] = 1.0
+
+X_train_standardized = (
+    X_train_weighted - feature_means
+) / feature_stds
+
+X_test_standardized = (
+    X_test_weighted - feature_means
+) / feature_stds
+
+# Add a bias column AFTER standardization.
+X_train_lr = np.column_stack((
+    np.ones(X_train_standardized.shape[0]),
+    X_train_standardized
+))
+
+X_test_lr = np.column_stack((
+    np.ones(X_test_standardized.shape[0]),
+    X_test_standardized
+))
+
+print("Training matrix with bias:", X_train_lr.shape)
+print("Testing matrix with bias:", X_test_lr.shape)
+print("Mean of first standardized feature:",
+      X_train_standardized[:, 0].mean())
+print("Standard deviation of first standardized feature:",
+      X_train_standardized[:, 0].std())
+
+assert X_train_lr.shape == (5000, 2001)
+assert X_test_lr.shape == (1000, 2001)
+
+
+
+# %% [markdown]
+# ### 3.3 Logistic Regression implementation
+
+# %%
+class LogisticRegressionScratch:
+    def __init__(self, learning_rate=0.1, n_iterations=1000):
+        self.learning_rate = learning_rate
+        self.n_iterations = n_iterations
+        self.weights = None
+        self.loss_history = []
+
+    @staticmethod
+    def sigmoid(z):
+        # Clipping prevents numerical overflow in exp().
+        z = np.clip(z, -500, 500)
+        return 1.0 / (1.0 + np.exp(-z))
+
+    @staticmethod
+    def binary_cross_entropy(y_true, probabilities):
+        # Clipping prevents log(0).
+        eps = 1e-12
+        probabilities = np.clip(probabilities, eps, 1.0 - eps)
+
+        loss = -np.mean(
+            y_true * np.log(probabilities)
+            + (1 - y_true) * np.log(1 - probabilities)
+        )
+        return float(loss)
+
+    def fit(self, X, y, print_every=100):
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+
+        n_samples, n_features = X.shape
+
+        # Initialize all coefficients to zero.
+        self.weights = np.zeros(n_features, dtype=np.float64)
+        self.loss_history = []
+
+        for iteration in range(self.n_iterations):
+            # Forward pass
+            scores = X @ self.weights
+            probabilities = self.sigmoid(scores)
+
+            # Calculate BCE
+            loss = self.binary_cross_entropy(y, probabilities)
+            self.loss_history.append(loss)
+
+            # Compute gradient
+            gradient = (X.T @ (probabilities - y)) / n_samples
+
+            # Gradient Descent update
+            self.weights -= self.learning_rate * gradient
+
+            if (
+                iteration == 0
+                or (iteration + 1) % print_every == 0
+                or iteration == self.n_iterations - 1
+            ):
+                print(
+                    f"Iteration {iteration + 1:4d}/"
+                    f"{self.n_iterations} | "
+                    f"BCE Loss: {loss:.6f}"
+                )
+
+        return self
+
+    def predict_proba(self, X):
+        if self.weights is None:
+            raise ValueError("Train the model before making predictions.")
+
+        return self.sigmoid(np.asarray(X) @ self.weights)
+
+    def predict(self, X, threshold=0.5):
+        probabilities = self.predict_proba(X)
+        return (probabilities >= threshold).astype(int)
+
+
+
+# %% [markdown]
+# ### 3.4 Train Logistic Regression
+
+# %%
+logistic_model = LogisticRegressionScratch(
+    learning_rate=0.1,
+    n_iterations=1000
+)
+
+logistic_model.fit(
+    X_train_lr,
+    y_train,
+    print_every=100
+)
+
+print("\nInitial BCE loss:", logistic_model.loss_history[0])
+print("Final BCE loss:", logistic_model.loss_history[-1])
+print(
+    "Loss decreased:",
+    logistic_model.loss_history[-1] < logistic_model.loss_history[0]
+)
+
+
+
+# %% [markdown]
+# ### 3.5 Evaluate Logistic Regression
+
+# %%
+y_pred_lr = logistic_model.predict(X_test_lr)
+
+lr_metrics = classification_metrics(y_test, y_pred_lr)
+
+print("NB-Weighted Logistic Regression Results")
+print("-" * 45)
+print(f"Accuracy: {lr_metrics['accuracy']:.4f}")
+print(f"F1-Score: {lr_metrics['f1']:.4f}")
+
+# Compare all three models
+results = {
+    "Bigram Language Model": lm_metrics,
+    "Naive Bayes": nb_metrics,
+    "NB-Weighted Logistic Regression": lr_metrics
+}
+
+print("\nFinal Model Comparison")
+print("-" * 65)
+print(f"{'Model':<35} {'Accuracy':>12} {'F1-Score':>12}")
+
+for model_name, metrics in results.items():
+    print(
+        f"{model_name:<35} "
+        f"{metrics['accuracy']:>12.4f} "
+        f"{metrics['f1']:>12.4f}"
+    )
+
+
+
+# %% [markdown]
+# ### 3.6 Visualize the training loss
+
+# %%
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(8, 4))
+plt.plot(logistic_model.loss_history)
+plt.xlabel("Iteration")
+plt.ylabel("Binary Cross-Entropy Loss")
+plt.title("Logistic Regression Training Loss")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
