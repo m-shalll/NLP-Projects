@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.6
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -15,7 +15,7 @@
 # ---
 
 # %% [markdown]
-# # Data Setup and Inspection
+# ## Data Setup and Inspection
 #
 
 # %%
@@ -78,7 +78,7 @@ print("\nRaw positive review:\n", X_train[np.flatnonzero(y_train == 1)[0]])
 
 
 # %% [markdown]
-# # Processing and tokenization
+# ## Processing and tokenization
 #
 
 # %%
@@ -112,7 +112,7 @@ print("Example tokens:", X_train_tokens[0][:40])
 
 
 # %% [markdown]
-# # Class-Conditional Bigram Language Models
+# ## Class-Conditional Bigram Language Models
 #
 
 # %%
@@ -155,7 +155,7 @@ print("Language-model vocabulary size:", len(lm_vocab))
 
 
 # %% [markdown]
-# # Log-Likelihood, Perplexity, and LM Classification
+# ## Log-Likelihood, Perplexity, and LM Classification
 #
 
 # %%
@@ -237,7 +237,7 @@ print("Bigram LM:", lm_metrics)
 
 
 # %% [markdown]
-# # Next-Word Prediction
+# ## Next-Word Prediction
 #
 
 # %%
@@ -269,10 +269,10 @@ print(
 
 
 # %% [markdown]
-# ### **Part 2:Vocabulary, Naive Bayes, and Log-Ratios**
+# ## Part 2: Vocabulary, Naive Bayes, and Log-Ratios
 
 # %% [markdown]
-#     2.1 Building the vocabulary
+# ### 2.1 Building the vocabulary
 
 # %%
 from collections import Counter
@@ -313,7 +313,7 @@ vocabulary = {
 
 
 # %% [markdown]
-#     2.2 Counting Probabilites
+# ### 2.2 Counting Probabilites
 
 # %%
 
@@ -341,7 +341,7 @@ def calculate_probabilites():
 
 
 # %% [markdown]
-#     2.3 compute Log Ratios
+# ### 2.3 compute Log Ratios
 
 # %%
 def compute_log_ratios():
@@ -353,7 +353,7 @@ log_ratios=compute_log_ratios()
 
 
 # %% [markdown]
-#     2.4 Naive Bayes Prediction
+# ### 2.4 Naive Bayes Prediction
 
 # %%
 def predict_naive_bayes(X):
@@ -643,3 +643,9 @@ plt.tight_layout()
 plt.show()
 
 
+
+# %% [markdown]
+# ## Part 4: Evaluation and Analysis
+
+# %% [markdown]
+#
