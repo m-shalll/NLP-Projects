@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.6
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -15,7 +15,10 @@
 # ---
 
 # %% [markdown]
-# # Data Setup and Inspection
+# ## Part 1: Pre-processing, Language Models, and Perplexity
+
+# %% [markdown]
+# ### 1.1 Data Setup and Inspection
 #
 
 # %%
@@ -25,6 +28,9 @@ import re
 
 import numpy as np
 from datasets import load_dataset
+
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
 
 SEED = 17
 TRAIN_PER_CLASS = 2500
@@ -78,7 +84,7 @@ print("\nRaw positive review:\n", X_train[np.flatnonzero(y_train == 1)[0]])
 
 
 # %% [markdown]
-# # Processing and tokenization
+# ### 1.2 Processing and tokenization
 #
 
 # %%
@@ -112,7 +118,7 @@ print("Example tokens:", X_train_tokens[0][:40])
 
 
 # %% [markdown]
-# # Class-Conditional Bigram Language Models
+# ### 1.3 Class-Conditional Bigram Language Models
 #
 
 # %%
@@ -155,7 +161,7 @@ print("Language-model vocabulary size:", len(lm_vocab))
 
 
 # %% [markdown]
-# # Log-Likelihood, Perplexity, and LM Classification
+# ### 1.4 Log-Likelihood, Perplexity, and LM Classification
 #
 
 # %%
@@ -237,7 +243,7 @@ print("Bigram LM:", lm_metrics)
 
 
 # %% [markdown]
-# # Next-Word Prediction
+# ### 1.5 Next-Word Prediction
 #
 
 # %%
@@ -269,10 +275,10 @@ print(
 
 
 # %% [markdown]
-# ### **Part 2:Vocabulary, Naive Bayes, and Log-Ratios**
+# ## Part 2: Vocabulary, Naive Bayes, and Log-Ratios
 
 # %% [markdown]
-#     2.1 Building the vocabulary
+# ### 2.1 Building the vocabulary
 
 # %%
 from collections import Counter
@@ -313,7 +319,7 @@ vocabulary = {
 
 
 # %% [markdown]
-#     2.2 Counting Probabilites
+# ### 2.2 Counting Probabilites
 
 # %%
 
@@ -341,7 +347,7 @@ def calculate_probabilites():
 
 
 # %% [markdown]
-#     2.3 compute Log Ratios
+# ### 2.3 compute Log Ratios
 
 # %%
 def compute_log_ratios():
@@ -353,7 +359,7 @@ log_ratios=compute_log_ratios()
 
 
 # %% [markdown]
-#     2.4 Naive Bayes Prediction
+# ### 2.4 Naive Bayes Prediction
 
 # %%
 def predict_naive_bayes(X):
@@ -614,25 +620,11 @@ results = {
     "NB-Weighted Logistic Regression": lr_metrics
 }
 
-print("\nFinal Model Comparison")
-print("-" * 65)
-print(f"{'Model':<35} {'Accuracy':>12} {'F1-Score':>12}")
-
-for model_name, metrics in results.items():
-    print(
-        f"{model_name:<35} "
-        f"{metrics['accuracy']:>12.4f} "
-        f"{metrics['f1']:>12.4f}"
-    )
-
-
 
 # %% [markdown]
 # ### 3.6 Visualize the training loss
 
 # %%
-import matplotlib.pyplot as plt
-
 plt.figure(figsize=(8, 4))
 plt.plot(logistic_model.loss_history)
 plt.xlabel("Iteration")
@@ -643,3 +635,206 @@ plt.tight_layout()
 plt.show()
 
 
+
+# %% [markdown]
+# ## Part 4: Evaluation and Analysis
+# ### 4.1 Collecting the numbers needed for the comparison
+
+# %%
+def detailed_metrics(y_true, y_pred):
+    """Accuracy, precision, recall, F1, and confusion counts for the positive class."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    true_positive = int(np.sum((y_true == 1) & (y_pred == 1)))
+    true_negative = int(np.sum((y_true == 0) & (y_pred == 0)))
+    false_positive = int(np.sum((y_true == 0) & (y_pred == 1)))
+    false_negative = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+    accuracy = (true_positive + true_negative) / len(y_true)
+    precision = (
+        true_positive / (true_positive + false_positive)
+        if true_positive + false_positive
+        else 0.0
+    )
+    recall = (
+        true_positive / (true_positive + false_negative)
+        if true_positive + false_negative
+        else 0.0
+    )
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision + recall
+        else 0.0
+    )
+
+    return {
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "tp": true_positive,
+        "tn": true_negative,
+        "fp": false_positive,
+        "fn": false_negative,
+    }
+
+
+input_representation = {
+    "Bigram Language Model": (
+        "Ordered token sequence with <s>/</s>; class-conditional "
+        "bigram counts with Laplace smoothing"
+    ),
+    "Naive Bayes": (
+        "Bag of the top-2,000 unigrams + bigrams; "
+        "sum of feature log-ratios"
+    ),
+    "NB-Weighted Logistic Regression": (
+        "Top-2,000 counts scaled by log-ratio r_j, z-scored, "
+        "plus a bias column; weights learned"
+    ),
+}
+
+y_pred_train = {
+    "Bigram Language Model": predict_with_language_models(X_train_tokens),
+    "Naive Bayes": np.asarray(
+        [predict_naive_bayes(tokens) for tokens in X_train_tokens]
+    ),
+    "NB-Weighted Logistic Regression": logistic_model.predict(X_train_lr),
+}
+
+y_pred_test = {
+    "Bigram Language Model": y_pred_lm,
+    "Naive Bayes": np.asarray(y_pred_nb),
+    "NB-Weighted Logistic Regression": y_pred_lr,
+}
+
+comparison = {
+    name: {
+        "train": detailed_metrics(y_train, y_pred_train[name]),
+        "test": detailed_metrics(y_test, y_pred_test[name]),
+    }
+    for name in input_representation
+}
+
+# %% [markdown]
+# ### 4.2 Confusion Matrix
+
+# %%
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for ax, (name, y_pred) in zip(axes, y_pred_test.items()):
+    cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
+
+    image = ax.imshow(cm, cmap="Blues")
+
+    # Display the count inside each cell
+    for i in range(2):
+        for j in range(2):
+            ax.text(
+                j, i, str(cm[i, j]),
+                ha="center",
+                va="center",
+                fontsize=14,
+                color="white" if cm[i, j] > cm.max() * 0.5 else "black"
+            )
+
+    ax.set_title(name)
+    ax.set_xlabel("Predicted Label")
+    ax.set_ylabel("Actual Label")
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Negative", "Positive"])
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["Negative", "Positive"])
+
+    # Add grid lines between cells
+    ax.set_xticks([0.5], minor=True)
+    ax.set_yticks([0.5], minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# ### 4.3 Comparison table
+
+# %%
+print("Model, Train Acc, Test Acc, Precision, Recall, F1")
+
+for name, metrics in comparison.items():
+    train_acc = metrics["train"]["accuracy"]
+    test = metrics["test"]
+    print(
+        name,
+        train_acc,
+        test["accuracy"],
+        test["precision"],
+        test["recall"],
+        test["f1"],
+        sep=", "
+    )
+
+# %% [markdown]
+# | Model | Train Accuracy | Test Accuracy | Precision | Recall | F1-Score |
+# |:---|---:|---:|---:|---:|---:|
+# | Bigram Language Model | 0.9996 | 0.8540 | 0.8457 | 0.8660 | 0.8557 |
+# | Naive Bayes | 0.7992 | 0.7730 | 0.7961 | 0.7340 | 0.7638 |
+# | NB-Weighted Logistic Regression | 0.9870 | 0.8170 | 0.8423 | 0.7800 | 0.8100 |
+
+# %% [markdown]
+# ### 4.3 How often do the models agree?
+
+# %%
+model_names = list(y_pred_test)
+print(f"{'':<34}" + "".join(f"{name[:13]:>14}" for name in model_names))
+for first in model_names:
+    row = "".join(
+        f"{100 * np.mean(y_pred_test[first] == y_pred_test[second]):>14.2f}"
+        for second in model_names
+    )
+    print(f"{first:<34}{row}")
+
+# The classes are balanced, so the prior log-ratio is ~0 (NB can ignore it).
+positive_prior = len(positive_reviews) / len(X_train_tokens)
+print(
+    "\nClass prior P(positive):", round(positive_prior, 4),
+    "| log prior ratio:", round(float(np.log(positive_prior / (1 - positive_prior))), 4),
+)
+
+# %% [markdown]
+# ### 4.4 Where do the models disagree?
+
+# %%
+disagreement_index = next(
+    index
+    for index in range(len(y_test))
+    if len({y_pred_test[name][index] for name in model_names}) > 1
+)
+
+print("Review (truncated):\n", X_test[disagreement_index][:600], "...\n")
+print("True label:", int(y_test[disagreement_index]))
+for name in model_names:
+    metrics = comparison[name]["test"]
+    print(
+        f"{name:<34} prediction={int(y_pred_test[name][disagreement_index])} "
+        f"| test accuracy={metrics['accuracy']:.4f} | F1={metrics['f1']:.4f}"
+    )
+print(
+    "\nBigram LM scores for this document:",
+    score_document(X_test[disagreement_index]),
+)
+
+# %% [markdown]
+# ### 4.5 Model comparison and discussion
+# The three models use different approaches to represent and classify movie reviews.
+#
+# The **Bigram Language Model** uses an ordered sequence of tokens, including start and end markers, and estimates class-conditional bigram probabilities with Laplace smoothing. It achieved the best performance, with a test accuracy of **85.40%** and an F1-score of **85.57%**. By modeling consecutive words, it can capture local word order and sentiment-related phrases.
+#
+# **Naive Bayes** represents each review using the counts of the top 2,000 unigram and bigram features and classifies reviews using feature log-ratios. It achieved a test accuracy of **77.30%** and an F1-score of **76.38%**, the lowest scores among the three models.
+#
+# **NB-Weighted Logistic Regression** uses the same unigram and bigram features, scales them using their log-ratios, standardizes them, and learns classification weights through training. It achieved a test accuracy of **81.70%** and an F1-score of **81.00%**, outperforming Naive Bayes but not the Bigram Language Model.
+#
+# Overall, the Bigram Language Model performed best on the test set, followed by NB-Weighted Logistic Regression and Naive Bayes. A possible explanation is that modeling word sequences captures useful local context that the feature-based approaches do not represent in the same way. 
+#
