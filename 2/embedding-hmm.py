@@ -15,7 +15,7 @@
 # ---
 
 # %% [markdown]
-# # 1.1 Data Setup
+# # Data Setup
 
 # %%
 import numpy as np
@@ -23,4 +23,7 @@ from datasets import load_dataset
 import matplotlib.pyplot as plt
 
 SEED = 17
+
+dataset = load_dataset("eriktks/conll2000", revision="refs/convert/parquet") #download parquet instead of py script
+print(dataset)
 
