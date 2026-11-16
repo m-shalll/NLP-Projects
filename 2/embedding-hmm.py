@@ -106,4 +106,84 @@ print(f"<UNK> rate: {sum((s == 0).sum() for s in train_ids) / num_train_tokens:.
 print("Most common words:", idx[1:16])    # idx[0] is <UNK>
 
 
+# %% [markdown]
+# # 1.2: PMI
+
 # %%
+import math
+from collections import Counter, defaultdict
+
+WINDOW_SIZE = 2   # tokens to the left and right of the target that count as context
+ALPHA = 0.75      # context distribution smoothing
+
+# 1. Count (target, context) pairs
+pair_counts = Counter()
+for sentence in train_ids:
+    sentence = sentence.tolist()
+    for i, target in enumerate(sentence):
+        for j in range(max(0, i - WINDOW_SIZE), min(len(sentence), i + WINDOW_SIZE + 1)):
+            if i != j:
+                pair_counts[(target, sentence[j])] += 1
+
+# 2. Marginals
+total = sum(pair_counts.values())
+word_totals, context_counts = Counter(), Counter()
+for (target, context), count in pair_counts.items():
+    word_totals[target] += count
+    context_counts[context] += count
+
+context_smooth = {context: count ** ALPHA for context, count in context_counts.items()}
+context_norm = sum(context_smooth.values())
+
+# 3. Sparse rows: raw counts and PPMI
+count_rows = defaultdict(dict)
+ppmi_rows = defaultdict(dict)
+
+for (target, context), count in pair_counts.items():
+    count_rows[target][context] = count
+    prob_targetContext = count / total
+    prob_target = word_totals[target] / total
+    prob_context = context_smooth[context] / context_norm
+    pmi = math.log(prob_targetContext / (prob_target * prob_context))
+    if pmi > 0:                                   # positive PMI only
+        ppmi_rows[target][context] = pmi
+
+# 4. Norms and cosine similarity
+def compute_norms(rows):
+    return {t: math.sqrt(sum(x ** 2 for x in ctxs.values())) for t, ctxs in rows.items()}
+
+count_norms = compute_norms(count_rows)
+ppmi_norms = compute_norms(ppmi_rows)
+
+def cosine_sim(rows, norms, word, k=8, min_freq=0):
+    """Top-k cosine neighbours; candidates seen fewer than min_freq times in train are skipped."""
+    query = word2idx[word]
+    query_row = rows[query]
+    scores = []
+
+    for target, row in rows.items():
+        if target == query or target == 0 or not row:        # skip itself, <UNK>, empty rows
+            continue
+        if cnt[idx[target]] < min_freq:                      # optional rare-word filter
+            continue
+        small, large = (query_row, row) if len(query_row) < len(row) else (row, query_row)
+        dot = sum(x * large[context] for context, x in small.items() if context in large)
+        scores.append((dot / (norms[query] * norms[target] + 1e-8), target))
+
+    scores.sort(reverse=True)
+    return [idx[target] for _, target in scores[:k]]
+
+# 5. Sparsity stats
+nonzero_counts = sum(len(r) for r in count_rows.values())
+nonzero_ppmi = sum(len(r) for r in ppmi_rows.values())
+print(f"raw counts: {nonzero_counts:,} non-zero entries ({nonzero_counts / v**2:.2%} density)")
+print(f"PPMI:       {nonzero_ppmi:,} non-zero entries ({nonzero_ppmi / v**2:.2%} density)")
+
+# 6. Neighbours: raw counts, PPMI, and PPMI with the rare-word filter
+MIN_NEIGHBOR_FREQ = 5
+for word in ["company", "market", "bank", "interest", "profit"]:
+    if word in word2idx:
+        print(f"\n{word}")
+        print("  counts:       ", cosine_sim(count_rows, count_norms, word))
+        print("  PPMI:         ", cosine_sim(ppmi_rows, ppmi_norms, word))
+        print(f"  PPMI (freq>={MIN_NEIGHBOR_FREQ}):", cosine_sim(ppmi_rows, ppmi_norms, word, min_freq=MIN_NEIGHBOR_FREQ))
