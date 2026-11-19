@@ -9,7 +9,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.6
 #   kernelspec:
-#     display_name: nlp
+#     display_name: Python 3
 #     language: python
 #     name: python3
 # ---
@@ -187,3 +187,155 @@ for word in ["company", "market", "bank", "interest", "profit"]:
         print("  counts:       ", cosine_sim(count_rows, count_norms, word))
         print("  PPMI:         ", cosine_sim(ppmi_rows, ppmi_norms, word))
         print(f"  PPMI (freq>={MIN_NEIGHBOR_FREQ}):", cosine_sim(ppmi_rows, ppmi_norms, word, min_freq=MIN_NEIGHBOR_FREQ))
+
+# %% [markdown]
+# # 1.3: TF-IDF (sentences as documents)
+# %%
+n_docs = len(train_ids)
+doc_freq = Counter()
+tf_rows = defaultdict(dict)                       # word -> {doc: count}
+# one sentence = one document, so df is just how many sentences a word shows up in
+for d, sent in enumerate(train_ids):
+    for w, c in Counter(sent.tolist()).items():
+        if w != 0:                                # skip <UNK>
+            tf_rows[w][d] = c
+            doc_freq[w] += 1
+
+# log-scaled tf so a word repeated in one sentence doesnt dominate
+tfidf_rows = defaultdict(dict)                    # word -> {doc: weight}
+for w, docs in tf_rows.items():
+    idf = math.log(n_docs / doc_freq[w])          # common words get close to 0 here
+    for d, c in docs.items():
+        tfidf_rows[w][d] = (1 + math.log(c)) * idf
+
+tfidf_norms = compute_norms(tfidf_rows)           # same helper as in 1.2
+nnz = sum(len(r) for r in tfidf_rows.values())
+print(f"{n_docs:,} documents | {nnz:,} non-zeros ({nnz / (v * n_docs):.2%} density)")
+
+for word in ["company", "market", "bank", "interest", "profit"]:
+    if word in word2idx:
+        print(f"{word}: {cosine_sim(tfidf_rows, tfidf_norms, word, min_freq=MIN_NEIGHBOR_FREQ)}")
+
+# %% [markdown]
+# # 1.4: Word2Vec (Skip-Gram, Negative Sampling)
+
+# %%
+import time
+
+# clip so exp doesnt overflow
+def sigmoid(x): return 1 / (1 + np.exp(-np.clip(x, -35, 35)))
+
+# every (centre, context) pair inside the window, same window size as the pmi part
+def build_pairs(id_sents, window):
+    c, o = [], []
+    for s in id_sents:
+        s = s.tolist()
+        for i, t in enumerate(s):
+            if t == 0: continue                   # unk is never a centre
+            for j in range(max(0, i - window), min(len(s), i + window + 1)):
+                if j != i and s[j] != 0:          # ...and never a context
+                    c.append(t); o.append(s[j])
+    return np.array(c), np.array(o)
+
+train_c, train_o = build_pairs(train_ids, WINDOW_SIZE)
+val_c, val_o = build_pairs(val_ids, WINDOW_SIZE)
+
+# noise distribution for negatives: unigram^0.75, unk gets count 0 so it is never sampled
+unigram = np.array([cnt[w] if i > 0 else 0 for i, w in enumerate(idx)], dtype=float)
+noise_cdf = np.cumsum(unigram ** 0.75 / (unigram ** 0.75).sum())
+# sample by inverting the cdf, much faster than rng.choice with p=
+def sample_neg(rng, shape): return np.minimum(np.searchsorted(noise_cdf, rng.random_sample(shape)), v - 1)
+
+def loss_and_grads(W_in, W_out, c, o, neg):
+    v_c, u_o, u_n = W_in[c], W_out[o], W_out[neg]              # (B,d) (B,d) (B,K,d)
+    pos = np.einsum("bd,bd->b", v_c, u_o)
+    ng = np.einsum("bd,bkd->bk", v_c, u_n)
+    # logaddexp is the stable way to write -log(sigmoid(x))
+    loss = np.logaddexp(0, -pos) + np.logaddexp(0, ng).sum(1)   # -log s(pos) - sum log s(-neg)
+    # these are the derivatives from the markdown cell above
+    g_pos, g_neg = sigmoid(pos) - 1, sigmoid(ng)
+    grad_v = g_pos[:, None] * u_o + np.einsum("bk,bkd->bd", g_neg, u_n)
+    grad_uo = g_pos[:, None] * v_c
+    grad_un = g_neg[:, :, None] * v_c[:, None, :]
+    return loss, grad_v, grad_uo, grad_un
+
+# always 5 negatives and a fixed seed so val loss is comparable between runs
+def val_loss(W_in, W_out, K=5):
+    rng = np.random.RandomState(123)
+    return np.mean([loss_and_grads(W_in, W_out, val_c[s:s+4096], val_o[s:s+4096],
+                                   sample_neg(rng, (len(val_c[s:s+4096]), K)))[0].mean()
+                    for s in range(0, len(val_c), 4096)])
+
+def train_sgns(dim=100, K=5, epochs=5, lr0=0.025, lr_min=0.0025, batch=256, t=1e-3, verbose=True):
+    rng = np.random.RandomState(SEED)
+    W_in = (rng.random_sample((v, dim)) - 0.5) / dim            # small random init
+    W_out = np.zeros((v, dim))                                  # context table starts at zero
+    # drop frequent words more often ("the", ",", "."), otherwise they swamp every batch
+    keep = np.minimum(1, np.sqrt(t / np.maximum(unigram / unigram.sum(), 1e-12)))   # subsample frequent words
+    total = int(epochs * (keep[train_c] * keep[train_o]).sum() / batch) + 1         # steps, for the lr decay
+    step, step_losses, log = 0, [], []
+    for ep in range(1, epochs + 1):
+        # new random subsample + shuffle every epoch
+        m = (rng.random_sample(len(train_c)) < keep[train_c]) & (rng.random_sample(len(train_c)) < keep[train_o])
+        ec, eo = train_c[m], train_o[m]
+        p = rng.permutation(len(ec)); ec, eo = ec[p], eo[p]
+        tot, n = 0.0, 0
+        for s in range(0, len(ec), batch):
+            c, o = ec[s:s+batch], eo[s:s+batch]
+            neg = sample_neg(rng, (len(c), K))
+            lr = max(lr_min, lr0 * (1 - step / total))          # linear decay, floor at lr_min
+            loss, gv, guo, gun = loss_and_grads(W_in, W_out, c, o, neg)
+            # add.at because the same word can show up several times in one batch
+            np.add.at(W_in, c, -lr * gv)                                   # parameter updates
+            np.add.at(W_out, o, -lr * guo)
+            np.add.at(W_out, neg.ravel(), -lr * gun.reshape(-1, dim))
+            step_losses.append(loss.mean()); tot += loss.sum(); n += len(c); step += 1
+        log.append((ep, tot / n, val_loss(W_in, W_out)))
+        if verbose: print(f"epoch {ep}: train {log[-1][1]:.4f} | val {log[-1][2]:.4f}")
+    return W_in, step_losses, log
+
+# hyperparameter choice on validation loss (K fixed at 5)
+# short 3 epoch runs just to compare dims, test set is not touched
+sweep = {d: train_sgns(dim=d, epochs=3, verbose=False)[2][-1][2] for d in (50, 100, 200)}
+print("val loss by dim:", sweep)
+best_dim = min(sweep, key=sweep.get)
+
+# %%
+# final run with the best dim, longer
+w2v_emb, step_losses, log = train_sgns(dim=best_dim, epochs=10)
+
+# moving average over 100 steps, the raw curve is too noisy to read
+plt.figure(figsize=(5, 3.2))
+plt.plot(np.convolve(step_losses, np.ones(100) / 100, mode="valid"))
+plt.xlabel("step"); plt.ylabel("SGNS loss"); plt.title("Training loss"); plt.show()
+
+
+# %% [markdown]
+# # 1.5: Comparison
+
+# %%
+tfidf_norms = compute_norms(tfidf_rows)
+# normalise rows once so cosine is just a dot product
+E = w2v_emb / np.maximum(np.linalg.norm(w2v_emb, axis=1, keepdims=True), 1e-12)
+
+def w2v_neighbours(word, k=8, min_freq=MIN_NEIGHBOR_FREQ):
+    q = word2idx[word]
+    sims = E @ E[q]
+    sims[unigram < min_freq] = -np.inf; sims[q] = -np.inf      # same rare word filter as the sparse ones (also kills unk)
+    return [idx[t] for t in np.argsort(-sims)[:k]]
+
+# only words that exist in the vocab
+for w in [w for w in ["company", "market", "bank", "profit", "said", "new"] if w in word2idx]:
+    print(f"\n{w}")
+    print("  PPMI:    ", cosine_sim(ppmi_rows, ppmi_norms, w, min_freq=MIN_NEIGHBOR_FREQ))
+    print("  TF-IDF:  ", cosine_sim(tfidf_rows, tfidf_norms, w, min_freq=MIN_NEIGHBOR_FREQ))
+    print("  Word2Vec:", w2v_neighbours(w))
+
+# sparsity / dimensionality / storage (CSR: float32 value + int32 index = 8 bytes per non-zero)
+# dense word2vec is just v * dim float32s
+nnz_p = sum(len(r) for r in ppmi_rows.values()); nnz_t = sum(len(r) for r in tfidf_rows.values())
+n_docs = len(train_ids)
+print(f"\n{'':10}{'dims':>9}{'non-zeros':>12}{'density':>9}{'MB':>8}")
+print(f"{'PPMI':10}{v:>9,}{nnz_p:>12,}{nnz_p / v**2:>9.2%}{nnz_p * 8 / 1e6:>8.2f}")
+print(f"{'TF-IDF':10}{n_docs:>9,}{nnz_t:>12,}{nnz_t / (v * n_docs):>9.2%}{nnz_t * 8 / 1e6:>8.2f}")
+print(f"{'Word2Vec':10}{best_dim:>9,}{v * best_dim:>12,}{'100%':>9}{v * best_dim * 4 / 1e6:>8.2f}")
