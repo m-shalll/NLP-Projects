@@ -344,83 +344,158 @@ print(f"{'Word2Vec':10}{best_dim:>9,}{v * best_dim:>12,}{'100%':>9}{v * best_dim
 # # Part 2: Hidden Markov Model and Viterbi
 
 # %% [markdown]
-# Interface that Part 3 relies on. Only the signatures and return formats are fixed here,
-# the bodies (smoothing, unknown-word model, Viterbi, metrics) are Part 2's job.
+# ## 2.1 · Estimate initial, transition and emission probabilities
+# Each nonempty training sentence contributes one initial tag, one emission per token, and one transition per adjacent tag pair within that sentence. With the sentence length given, decoding uses one initial probability and no end-state factor. Rare training words share ID 0, so their observed tags teach the model how to score an unknown word.
+#
+# For each count row, add $k$ to every entry and divide by the row total plus $k$ times the number of columns. The initial distribution is a single row. Emissions have many more columns than transitions, so the validation grid tries smaller emission pseudocounts separately.
 
 # %%
-def train_hmm(sentences, tag_sequences):
-    """Estimate the HMM from tagged training sentences (raw tokens, tag strings).
+# Keep model state indices local to the baseline.
+hmm_tags = sorted({tag for sentence in train_tags for tag in sentence})
+tag_id = {tag: i for i, tag in enumerate(hmm_tags)}
+n_tags = len(hmm_tags)
+start_counts = np.zeros(n_tags, dtype=np.int64)
+transition_counts = np.zeros((n_tags, n_tags), dtype=np.int64)
+emission_counts = np.zeros((n_tags, len(word2idx)), dtype=np.int64)
 
-    Returns a dict with at least
-      'tags'      : list[str], the tag order used by every array below (T tags)
-      'log_init'  : (T,)   log P(t_1 = t)
-      'log_trans' : (T, T) log P(t_i = b | t_{i-1} = a), indexed [a, b]
-    plus whatever emission tables Part 2 needs.
-    """
-    raise NotImplementedError("Part 2")
+for words, tags in zip(train_ids, train_tags, strict=True):
+    assert len(words) == len(tags)
+    if len(words) == 0:
+        continue
+    states = np.array([tag_id[tag] for tag in tags])
+    start_counts[states[0]] += 1
+    np.add.at(transition_counts, (states[:-1], states[1:]), 1)
+    np.add.at(emission_counts, (states, words), 1)
 
-def is_unknown(hmm, token):
-    """True if `token` (raw string) is treated as an unknown word by the HMM."""
-    raise NotImplementedError("Part 2")
+def log_distribution(counts, k):
+    weights = counts + k
+    return np.log(weights / weights.sum(axis=-1, keepdims=True))
 
-def emission_log_probs(hmm, sentence):
-    """(n, T) array of log P(token_i | tag) for a raw token list, using Part 2's smoothing
-    and unknown-word handling. Must be finite everywhere."""
-    raise NotImplementedError("Part 2")
+def estimate_hmm(sequence_k, emission_k):
+    return (log_distribution(start_counts, sequence_k),
+            log_distribution(transition_counts, sequence_k),
+            log_distribution(emission_counts, emission_k))
 
-def viterbi(log_init, log_trans, log_emit):
-    """Most likely tag-index sequence (list[int], length n) for (T,), (T, T), (n, T) log-prob arrays."""
-    raise NotImplementedError("Part 2")
+# %% [markdown]
+# ## 2.2 · Viterbi decoding
+# At each position, keep the best cumulative log probability for each possible current tag. For current tag $j$, choose the previous tag $i$ that maximizes the previous score plus $\log P(j\mid i)$, then add $\log P(w_t\mid j)$. Save the winning predecessor for each $j$. After the last word, trace back from the highest-scoring final tag. Using sums of logs avoids underflow from multiplying many small probabilities.
 
-def evaluate(gold_tags, pred_tags, unknown_mask):
-    """gold_tags / pred_tags: lists of tag-string lists, unknown_mask: lists of bools (same shape).
+# %%
+def viterbi(word_ids, model):
+    log_start, log_transition, log_emission = model
+    if len(word_ids) == 0:
+        return np.empty(0, dtype=np.int64)
 
-    Returns {'all': m, 'unknown': m} where m = {'accuracy', 'precision', 'recall', 'f1'}
-    computed over all tokens and over unknown tokens only.
-    """
-    raise NotImplementedError("Part 2")
+    scores = log_start + log_emission[:, word_ids[0]]
+    back = np.zeros((len(word_ids), len(scores)), dtype=np.int64)
+    states = np.arange(len(scores))
+    for t in range(1, len(word_ids)):
+        candidates = scores[:, None] + log_transition  # previous x current
+        back[t] = candidates.argmax(axis=0)
+        scores = candidates[back[t], states] + log_emission[:, word_ids[t]]
+
+    path = np.empty(len(word_ids), dtype=np.int64)
+    path[-1] = scores.argmax()
+    for t in range(len(word_ids) - 1, 0, -1):
+        path[t - 1] = back[t, path[t]]
+    return path
+
+# %% [markdown]
+# ### Choose smoothing on validation sentences
+# The initial and transition distributions share one pseudocount. Select the pair with highest validation token accuracy, breaking ties by grid order. Keep the trained vocabulary and counts fixed throughout.
+
+# %%
+best_correct = -1
+val_gold = [np.array([tag_id.get(t, -1) for t in tags]) for tags in val_tags]
+val_total = sum(map(len, val_gold))
+for sequence_k in (0.01, 0.1, 1.0):
+    for emission_k in (0.001, 0.01, 0.1):
+        model = estimate_hmm(sequence_k, emission_k)
+        correct = sum(np.count_nonzero(viterbi(words, model) == gold)
+                      for words, gold in zip(val_ids, val_gold, strict=True))
+        print(f"sequence k={sequence_k:g}  emission k={emission_k:g}  "
+              f"validation accuracy={correct / val_total:.4%}")
+        if correct > best_correct:
+            best_correct = correct
+            best_settings = (sequence_k, emission_k)
+
+baseline_hmm = estimate_hmm(*best_settings)
+print("Selected (sequence k, emission k):", best_settings)
+
+# %% [markdown]
+# ## 2.3 · Test evaluation
+# Decode each complete sentence once. Apply each evaluation mask afterward so unknown words retain their context. A confusion matrix counts gold tags in rows and predictions in columns. For each tag, precision divides correct predictions by predicted count, and recall divides them by gold count. Macro F1 averages per-tag F1 over tags present in gold or predictions for that subset. Undefined scores count as zero. Micro precision, recall and F1 all equal token accuracy for this single-label task.
+
+# %%
+test_ids = encode(test_sents, word2idx)
+eval_id = {tag: i for i, tag in enumerate(pos_names)}
+state_to_eval = np.array([eval_id[tag] for tag in hmm_tags])
+groups = ("All tokens", "Known to vocabulary", "Mapped to <UNK>", "Unseen in training")
+confusion = {group: np.zeros((len(pos_names), len(pos_names)), dtype=np.int64)
+             for group in groups}
+
+for tokens, words, tags in zip(test_sents, test_ids, test_tags, strict=True):
+    predicted = state_to_eval[viterbi(words, baseline_hmm)]
+    gold = np.array([eval_id[tag] for tag in tags], dtype=np.int64)
+    unknown = words == word2idx["<UNK>"]
+    unseen = np.array([normalise(w) not in cnt for w in tokens], dtype=bool)
+    masks = (np.ones(len(words), dtype=bool), ~unknown, unknown, unseen)
+    for group, mask in zip(groups, masks):
+        np.add.at(confusion[group], (gold[mask], predicted[mask]), 1)
+
+def safe_ratio(a, b):
+    return np.divide(a, b, out=np.zeros_like(a, dtype=float), where=b != 0)
+
+def metrics(matrix):
+    hits = matrix.diagonal()
+    support = matrix.sum(axis=1)
+    predicted = matrix.sum(axis=0)
+    active = (support + predicted) > 0
+    precision = safe_ratio(hits, predicted)
+    recall = safe_ratio(hits, support)
+    f1 = safe_ratio(2 * hits, predicted + support)
+    if not np.any(active):
+        return (0, np.nan, np.nan, np.nan, np.nan)
+    return (int(support.sum()), hits.sum() / support.sum(),
+            precision[active].mean(), recall[active].mean(), f1[active].mean())
+
+print(f"{'Test subset':<21} {'Tokens':>7} {'Accuracy':>9} {'Macro P':>9} "
+      f"{'Macro R':>9} {'Macro F1':>9}")
+for group, matrix in confusion.items():
+    size, acc, p, r, f = metrics(matrix)
+    print(f"{group:<21} {size:7d} {acc:9.2%} {p:9.2%} {r:9.2%} {f:9.2%}")
 
 # %% [markdown]
 # # Part 3: Embedding-Assisted HMM
 #
 # ## 3.1 Strategy
-#
-# The baseline HMM has almost nothing to go on for an unknown word: one shared unknown-word
-# emission. The idea here is to let each Part 1 representation nominate **known words that could
-# stand in for the unknown one**, and borrow their tag distributions.
-#
-# For an unknown token $x$:
-#
-# 1. **Get a query from the representation.**
-#    - If the normalised form of $x$ is in the Part 1 vocabulary (e.g. `Bancorp` unseen by the
-#      HMM but `bancorp` seen, or any number → `<NUM>`), use its own vector.
-#    - Otherwise $x$ has no vector at all (it never appeared in train), so describe it through
-#      its context words $C$ (same ±2 window as Part 1), each representation in its own way:
-#      - **PMI:** the context words *are* PMI dimensions. Score each known word by the cosine between
-#        its PPMI row and the indicator vector of $C$, i.e. "which words like to appear next to these
-#        words" (first-order, syntagmatic).
-#      - **TF-IDF:** $x$'s missing document vector is approximated by the documents its context words
-#        occur in, so the score of $w$ is $\sum_{c \in C}\cos_\text{tfidf}(w, c)$ (topical relatedness).
-#      - **Word2Vec:** the mean embedding of $C$ is compared with each known word's *average training
-#        context* $\bar{c}_w = \sum_c n(w,c)\,e_c / \sum_c n(w,c)$, so we match the slot, not the
-#        neighbours themselves (averaging $C$ alone would return words similar to "the", "of" ...).
-# 2. **Nearest known words.** Keep the top-$k$ candidates that were seen at least
-#    `MIN_NEIGHBOR_FREQ` times (so their tag distributions are reliable) and weight them by their
-#    (positive) similarity $s_j$:
-#    $\hat P(t \mid x) = (1-\epsilon)\frac{\sum_j s_j P(t \mid w_j)}{\sum_j s_j} + \epsilon P(t)$.
-# 3. **Turn it into an emission score.** By Bayes, $P(x\mid t) \propto P(t\mid x)/P(t)$ (the $P(x)$
-#    factor is the same for every tag, so Viterbi ignores it). This is interpolated log-linearly with
-#    the baseline unknown emission:
-#    $\log e(x,t) = (1-\lambda)\log P_\text{HMM}(x\mid t) + \lambda\,[\log \hat P(t\mid x) - \log P(t)]$.
-#
-# Known words keep their HMM emissions untouched, so all differences between the four systems come
-# from unknown tokens. $k$ and $\lambda$ are tuned per representation on the validation split.
 
 # %%
-hmm = train_hmm(train_sents, train_tags)
-tags = hmm["tags"]
-T = len(tags)
-tag2i = {t: i for i, t in enumerate(tags)}
+log_start, log_transition, log_emission = baseline_hmm
+tags, T, tag2i = hmm_tags, n_tags, tag_id
+
+def is_unknown(token):
+    return word2idx.get(normalise(token), 0) == 0
+
+def emission_log_probs(sentence):
+    return log_emission[:, encode([sentence], word2idx)[0]].T
+
+def decode_emissions(log_emit):
+    return viterbi(np.arange(len(log_emit)), (log_start, log_transition, log_emit.T))
+
+def evaluate(gold_tags, pred_tags, unknown_mask):
+    conf = {g: np.zeros((len(pos_names), len(pos_names)), dtype=np.int64) for g in ("all", "unknown")}
+    for gs, ps, us in zip(gold_tags, pred_tags, unknown_mask):
+        g = np.array([eval_id[t] for t in gs], dtype=np.int64)
+        p = np.array([eval_id[t] for t in ps], dtype=np.int64)
+        u = np.array(us, dtype=bool)
+        np.add.at(conf["all"], (g, p), 1)
+        np.add.at(conf["unknown"], (g[u], p[u]), 1)
+    out = {}
+    for group, matrix in conf.items():
+        _, acc, prec, rec, f1 = metrics(matrix)
+        out[group] = {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
+    return out
 
 # P(tag | word) for every Part 1 vocabulary entry, counted on the train split with the same normalise()
 tag_word = np.zeros((v, T))
@@ -442,8 +517,8 @@ def context_ids(sentence, i, window=WINDOW_SIZE):
 
 # %% [markdown]
 # ### Similarity scorers
-# Each scorer returns a length-`v` score vector over the vocabulary for one query:
-# `self_scores(word_id)` when the token has its own vector, `slot_scores(context_ids)` otherwise.
+# Each scorer takes the context word ids of an unknown token and returns a length-`v` score vector
+# over the vocabulary.
 
 # %%
 from functools import lru_cache
@@ -464,11 +539,6 @@ def pmi_weighted(weights):
             ws, xs = ppmi_cols[c]
             s[ws] += wt * xs                         # ws has no repeats within one column
     return s
-
-def pmi_self(q):
-    row = ppmi_rows.get(q, {})
-    n = ppmi_norms.get(q, 0)
-    return pmi_weighted({c: x / n for c, x in row.items()}) if n > 0 else np.zeros(v)
 
 def pmi_slot(ctx):
     weights = Counter(ctx)
@@ -498,7 +568,6 @@ def tfidf_cos_row(q):
     vals = np.concatenate([x * tfidf_docs[d][1] for d, x in zip(ds, xs)])
     return np.bincount(ws, weights=vals, minlength=v).astype(np.float32)
 
-def tfidf_self(q): return tfidf_cos_row(q).astype(float)
 def tfidf_slot(ctx): return np.sum([tfidf_cos_row(c) for c in ctx], axis=0).astype(float)
 
 # ---- Word2Vec: unit embeddings E (from 1.5) and each word's average training context ----
@@ -511,29 +580,19 @@ for s in range(0, len(_pairs), 200_000):                          # chunked so t
 ctx_centroid /= np.maximum(np.linalg.norm(ctx_centroid, axis=1, keepdims=True), 1e-12)
 del _pairs, _n
 
-def w2v_self(q): return E @ E[q]
 def w2v_slot(ctx):
     m = E[ctx].mean(0)
     return ctx_centroid @ (m / max(np.linalg.norm(m), 1e-12))
 
-SCORERS = {
-    "PMI":      (pmi_self, pmi_slot),
-    "TF-IDF":   (tfidf_self, tfidf_slot),
-    "Word2Vec": (w2v_self, w2v_slot),
-}
+SCORERS = {"PMI": pmi_slot, "TF-IDF": tfidf_slot, "Word2Vec": w2v_slot}
 
 def neighbours(name, sentence, i, k):
-    """top-k candidate words for the unknown token sentence[i] as (ids, scores), best first; None if no query"""
-    self_f, slot_f = SCORERS[name]
-    q = word2idx.get(normalise(sentence[i]), 0)
-    if q != 0:
-        scores = self_f(q)
-    else:
-        ctx = context_ids(sentence, i)
-        if not ctx:
-            return None
-        scores = slot_f(ctx)
-        scores[ctx] = -np.inf                                   # a context word is not a stand-in for the slot
+    """top-k candidate words for the unknown token sentence[i] as (ids, scores), best first; None if no known context"""
+    ctx = context_ids(sentence, i)
+    if not ctx:
+        return None
+    scores = SCORERS[name](ctx)
+    scores[ctx] = -np.inf                                       # a context word is not a stand-in for the slot
     scores = np.where(candidate, scores, -np.inf)
     top = np.argpartition(-scores, k)[:k]
     top = top[np.argsort(-scores[top])]
@@ -543,7 +602,7 @@ def neighbours(name, sentence, i, k):
 _shown = 0
 for sent in val_sents:
     for i, w in enumerate(sent):
-        if _shown < 4 and is_unknown(hmm, w) and word2idx.get(normalise(w), 0) == 0 and context_ids(sent, i):
+        if _shown < 4 and is_unknown(w) and context_ids(sent, i):
             print(f"\n{' '.join(sent[max(0, i - 3):i])} [{w}] {' '.join(sent[i + 1:i + 4])}")
             for name in SCORERS:
                 print(f"  {name:9}", [idx[j] for j in neighbours(name, sent, i, 6)[0]])
@@ -576,9 +635,9 @@ def prepare(sents):
         if not sent:                                            # the dataset has a few empty sentences
             data.append({"emit": None, "unk": [], "base": [], "neigh": {name: {} for name in SCORERS}})
             continue
-        emit = emission_log_probs(hmm, sent)
-        unk = [is_unknown(hmm, w) for w in sent]
-        base_pred = [tags[j] for j in viterbi(hmm["log_init"], hmm["log_trans"], emit)]
+        emit = emission_log_probs(sent)
+        unk = [is_unknown(w) for w in sent]
+        base_pred = [tags[j] for j in decode_emissions(emit)]
         neigh = {name: {} for name in SCORERS}
         for i in np.flatnonzero(unk):
             for name in SCORERS:
@@ -600,7 +659,7 @@ def decode(data, name=None, k=10, lam=0.5):
             dist = neighbour_tag_dist(top[:k], sc[:k])
             if dist is not None:
                 emit[i] = assisted_emission(emit[i], dist, lam)
-        preds.append([tags[j] for j in viterbi(hmm["log_init"], hmm["log_trans"], emit)])
+        preds.append([tags[j] for j in decode_emissions(emit)])
     return preds
 
 t0 = time.time()
@@ -611,8 +670,6 @@ print(f"validation: {n_unk:,} unknown tokens ({n_unk / num_val_tokens:.2%}) | pr
 
 # %% [markdown]
 # ### Tuning $k$ and $\lambda$ on the validation split
-# Selected by overall validation accuracy (only unknown tokens and their neighbours can change, so this
-# also accounts for knock-on effects through the transitions). The test set is not used here.
 
 # %%
 K_GRID = [1, 5, 10, 20, 50]
@@ -701,11 +758,15 @@ for name in SCORERS:
 # %% [markdown]
 # ### Discussion
 #
-# *(Re-check against the numbers above once Part 2 is in place.)*
-#
-# - **Where the help comes from.** The baseline can only fall back on tag priors (plus whatever
-#   unknown-word model Part 2 uses), so it tends to dump unknown words into the most common open
-#   classes (NN/NNP). Borrowed tag distributions mostly help when the neighbours are *syntactically*
+# - **Results in short.** The gains are small but consistent with what each representation captures:
+#   on unknown test tokens PMI lifts accuracy from 52.97% to 53.75% and Word2Vec to 53.58%, while
+#   TF-IDF slightly hurts (52.78%). Validation chose $\lambda = 0.25$ for all three, i.e. the borrowed
+#   distribution is used as a correction to Part 2's `<UNK>` emission, not a replacement. Word2Vec
+#   changes the most tags (178 fixed / 153 broken), PMI is the most precise (135 / 103).
+# - **Where the help comes from.** In the Part 2 baseline every unknown token shares one `<UNK>`
+#   emission column, learned from the words seen only once in training, so the tag of an unknown word
+#   is decided by that single distribution plus the transitions. It tends to dump unknown words into
+#   the most common open classes (NN/NNP). Borrowed tag distributions mostly help when the neighbours are *syntactically*
 #   alike, e.g. an unseen verb form after "has" or "to" getting VBN/VB neighbours, or an unseen
 #   capitalised name surrounded by other names.
 # - **PMI (sparse, first-order).** Its slot scores ask "which words appear right next to these
@@ -718,13 +779,10 @@ for name in SCORERS:
 #   verb towards NN because the sentence is about markets. Worse, punctuation and stopwords occur in
 #   almost every sentence, so their (low-idf but non-zero) rows overlap with *any* context and they
 #   become hubs at the top of the neighbour list in context mode. That is why validation keeps $k$
-#   and $\lambda$ small for TF-IDF: it is mainly useful in the self-vector case.
+#   and $\lambda$ small for TF-IDF.
 # - **Word2Vec (dense).** The context-centroid comparison is smooth: even rare context words have a
 #   meaningful vector, so it degrades gracefully where PMI's rows are empty. On the other hand the
 #   averaging blurs word order (left vs right neighbour), so it confuses tags that differ mostly by
 #   position (e.g. JJ vs NN in "the ___ market", VBD vs VBN).
-# - **Self-vector case.** Tokens whose normalised form is in the vocabulary (case variants, numbers →
-#   `<NUM>`) get very reliable neighbours from all three representations because the word itself is
-#   usually its own top neighbour; most of the "free" gains come from these.
 # - **Tuned λ** reflects how much each representation is trusted: a small λ means the baseline
 #   unknown model was already about as good, a large one means the borrowed distribution dominates.
