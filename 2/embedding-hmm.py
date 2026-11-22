@@ -7,9 +7,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.6
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: nlp
 #     language: python
 #     name: python3
 # ---
@@ -44,8 +44,8 @@ test_sents, test_tags = extract(dataset["test"])
 
 rng = np.random.RandomState(SEED)
 perm = rng.permutation(len(train_full_sents))
-split_val = int(len(train_full_sents) * 0.2)
-val_idx, train_idx = perm[:split_val], perm[split_val:]
+n_val = int(len(train_full_sents) * 0.2)
+val_idx, train_idx = perm[:n_val], perm[n_val:]
 
 train_sents = [train_full_sents[i] for i in train_idx]
 train_tags = [train_full_tags[i] for i in train_idx]
@@ -68,7 +68,7 @@ assert len(set(train_idx) & set(val_idx)) == 0
 #
 
 # %%
-import re 
+import re
 from collections import Counter
 
 DIGIT_REGEX = re.compile(r'\d')
@@ -81,9 +81,9 @@ MIN_COUNT = 2 # How many times a token must appear to be included in the vocabul
 
 def build_vocab(sentences, min_count=MIN_COUNT):
     cnt = Counter(normalise(token) for sentence in sentences for token in sentence)
-    words = [word for word, count in cnt.items() if count >= min_count and word != "<UNK>"]
-    words.sort(key=lambda x: (-cnt[x], x))  # Sort by frequency (descending) and then alphabetically
-    idx = ["<UNK>"] + words  # Add <UNK> token at the beginning
+    words = [word for word, count in cnt.items() if count >= min_count]
+    words.sort(key=lambda x: (-cnt[x], x))  # frequency desc, then alphabetical
+    idx = ["<UNK>"] + words  # <UNK> at index 0
     word2idx = {word: i for i, word in enumerate(idx)}
     return cnt, idx, word2idx
 
@@ -115,14 +115,17 @@ from collections import Counter, defaultdict
 
 WINDOW_SIZE = 2   # tokens to the left and right of the target that count as context
 ALPHA = 0.75      # context distribution smoothing
+UNK = 0
 
-# 1. Count (target, context) pairs
+# 1. Count (target, context) pairs, skipping <UNK> as target or context
 pair_counts = Counter()
 for sentence in train_ids:
     sentence = sentence.tolist()
     for i, target in enumerate(sentence):
+        if target == UNK:
+            continue
         for j in range(max(0, i - WINDOW_SIZE), min(len(sentence), i + WINDOW_SIZE + 1)):
-            if i != j:
+            if i != j and sentence[j] != UNK:
                 pair_counts[(target, sentence[j])] += 1
 
 # 2. Marginals
@@ -132,7 +135,7 @@ for (target, context), count in pair_counts.items():
     word_totals[target] += count
     context_counts[context] += count
 
-context_smooth = {context: count ** ALPHA for context, count in context_counts.items()}
+context_smooth = {c: n ** ALPHA for c, n in context_counts.items()}
 context_norm = sum(context_smooth.values())
 
 # 3. Sparse rows: raw counts and PPMI
@@ -141,12 +144,16 @@ ppmi_rows = defaultdict(dict)
 
 for (target, context), count in pair_counts.items():
     count_rows[target][context] = count
-    prob_targetContext = count / total
-    prob_target = word_totals[target] / total
-    prob_context = context_smooth[context] / context_norm
-    pmi = math.log(prob_targetContext / (prob_target * prob_context))
+    p_joint = count / total
+    p_target = word_totals[target] / total
+    p_context = context_smooth[context] / context_norm
+    pmi = math.log(p_joint / (p_target * p_context))
     if pmi > 0:                                   # positive PMI only
         ppmi_rows[target][context] = pmi
+
+# Freeze to plain dicts so lookups can't silently create rows
+count_rows = dict(count_rows)
+ppmi_rows = dict(ppmi_rows)
 
 # 4. Norms and cosine similarity
 def compute_norms(rows):
@@ -157,20 +164,23 @@ ppmi_norms = compute_norms(ppmi_rows)
 
 def cosine_sim(rows, norms, word, k=8, min_freq=0):
     """Top-k cosine neighbours; candidates seen fewer than min_freq times in train are skipped."""
-    query = word2idx[word]
-    query_row = rows[query]
+    query = word2idx.get(word)
+    query_row = rows.get(query) if query is not None else None
+    if not query_row:                                  # unknown word or no non-zero entries
+        return []
+    q_norm = norms[query]
     scores = []
 
     for target, row in rows.items():
-        if target == query or target == 0 or not row:        # skip itself, <UNK>, empty rows
+        if target == query or target == UNK or not row:
             continue
-        if cnt[idx[target]] < min_freq:                      # optional rare-word filter
+        if cnt[idx[target]] < min_freq:
             continue
         small, large = (query_row, row) if len(query_row) < len(row) else (row, query_row)
-        dot = sum(x * large[context] for context, x in small.items() if context in large)
-        scores.append((dot / (norms[query] * norms[target] + 1e-8), target))
+        dot = sum(x * large[c] for c, x in small.items() if c in large)
+        scores.append((dot / (q_norm * norms[target] + 1e-8), target))
 
-    scores.sort(reverse=True)
+    scores.sort(key=lambda s: (-s[0], s[1]))           # explicit, deterministic tie-break
     return [idx[target] for _, target in scores[:k]]
 
 # 5. Sparsity stats
