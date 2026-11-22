@@ -30,7 +30,7 @@ print(dataset)
 
 # POS label names (id -> tag string); falls back to an error message if the metadata is missing
 pos_feature = dataset["train"].features["pos_tags"].feature
-assert hasattr(pos_feature, "names"), "pos_tags has no label names; send me the features print"
+assert hasattr(pos_feature, "names")
 pos_names = pos_feature.names
 print(len(pos_names), "POS tags:", pos_names)
 
