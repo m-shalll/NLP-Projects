@@ -203,6 +203,7 @@ for word in ["company", "market", "bank", "interest", "profit"]:
 hmm_tags = sorted({tag for sentence in train_tags for tag in sentence})
 tag_id = {tag: i for i, tag in enumerate(hmm_tags)}
 n_tags = len(hmm_tags)
+#gives prior probabiluty of each tag 
 start_counts = np.zeros(n_tags, dtype=np.int64)
 transition_counts = np.zeros((n_tags, n_tags), dtype=np.int64)
 emission_counts = np.zeros((n_tags, len(word2idx)), dtype=np.int64)
@@ -211,15 +212,19 @@ for words, tags in zip(train_ids, train_tags, strict=True):
     assert len(words) == len(tags)
     if len(words) == 0:
         continue
+    #finds tag id for every tag in sent.
     states = np.array([tag_id[tag] for tag in tags])
+    #finds the index of the first tag in the sentence and inc. prior count
     start_counts[states[0]] += 1
+    
     np.add.at(transition_counts, (states[:-1], states[1:]), 1)
     np.add.at(emission_counts, (states, words), 1)
-
+#converts counts to log probabilities with +1 smoothing
 def log_distribution(counts, k):
+    #k is a hyperparam.
     weights = counts + k
     return np.log(weights / weights.sum(axis=-1, keepdims=True))
-
+#func to get all needed probs: emission, transition and prior 
 def estimate_hmm(sequence_k, emission_k):
     return (log_distribution(start_counts, sequence_k),
             log_distribution(transition_counts, sequence_k),
@@ -234,12 +239,19 @@ def viterbi(word_ids, model):
     log_start, log_transition, log_emission = model
     if len(word_ids) == 0:
         return np.empty(0, dtype=np.int64)
-
+    # calculates score for first word(prior*emission) for every tag
     scores = log_start + log_emission[:, word_ids[0]]
+    # backpointer for every word in the sent (holds id of best prev tag)
     back = np.zeros((len(word_ids), len(scores)), dtype=np.int64)
+    # containes all tags indices
     states = np.arange(len(scores))
+    # 
     for t in range(1, len(word_ids)):
-        candidates = scores[:, None] + log_transition  # previous x current
+        # stores score for every possible tag pair(prev-curr)
+        # None= mkaes the scores array 2D so that it can be added to the transition matrix
+        candidates = scores[:, None] + log_transition  # prev x curr
+        # get max score for each row
+        # to select best tag for prev word 
         back[t] = candidates.argmax(axis=0)
         scores = candidates[back[t], states] + log_emission[:, word_ids[t]]
 
