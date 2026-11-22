@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.6
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -107,7 +107,7 @@ print("Most common words:", idx[1:16])    # idx[0] is <UNK>
 
 
 # %% [markdown]
-# # 1.2: PMI
+# ## 1.2: PMI
 
 # %%
 import math
@@ -189,7 +189,7 @@ for word in ["company", "market", "bank", "interest", "profit"]:
         print(f"  PPMI (freq>={MIN_NEIGHBOR_FREQ}):", cosine_sim(ppmi_rows, ppmi_norms, word, min_freq=MIN_NEIGHBOR_FREQ))
 
 # %% [markdown]
-# # 1.3: TF-IDF (sentences as documents)
+# ## 1.3: TF-IDF (sentences as documents)
 # %%
 n_docs = len(train_ids)
 doc_freq = Counter()
@@ -217,7 +217,7 @@ for word in ["company", "market", "bank", "interest", "profit"]:
         print(f"{word}: {cosine_sim(tfidf_rows, tfidf_norms, word, min_freq=MIN_NEIGHBOR_FREQ)}")
 
 # %% [markdown]
-# # 1.4: Word2Vec (Skip-Gram, Negative Sampling)
+# ## 1.4: Word2Vec (Skip-Gram, Negative Sampling)
 
 # %%
 import time
@@ -311,7 +311,7 @@ plt.xlabel("step"); plt.ylabel("SGNS loss"); plt.title("Training loss"); plt.sho
 
 
 # %% [markdown]
-# # 1.5: Comparison
+# ## 1.5: Comparison
 
 # %%
 tfidf_norms = compute_norms(tfidf_rows)
@@ -339,3 +339,392 @@ print(f"\n{'':10}{'dims':>9}{'non-zeros':>12}{'density':>9}{'MB':>8}")
 print(f"{'PPMI':10}{v:>9,}{nnz_p:>12,}{nnz_p / v**2:>9.2%}{nnz_p * 8 / 1e6:>8.2f}")
 print(f"{'TF-IDF':10}{n_docs:>9,}{nnz_t:>12,}{nnz_t / (v * n_docs):>9.2%}{nnz_t * 8 / 1e6:>8.2f}")
 print(f"{'Word2Vec':10}{best_dim:>9,}{v * best_dim:>12,}{'100%':>9}{v * best_dim * 4 / 1e6:>8.2f}")
+
+# %% [markdown]
+# # Part 2: Hidden Markov Model and Viterbi
+
+# %% [markdown]
+# Interface that Part 3 relies on. Only the signatures and return formats are fixed here,
+# the bodies (smoothing, unknown-word model, Viterbi, metrics) are Part 2's job.
+
+# %%
+def train_hmm(sentences, tag_sequences):
+    """Estimate the HMM from tagged training sentences (raw tokens, tag strings).
+
+    Returns a dict with at least
+      'tags'      : list[str], the tag order used by every array below (T tags)
+      'log_init'  : (T,)   log P(t_1 = t)
+      'log_trans' : (T, T) log P(t_i = b | t_{i-1} = a), indexed [a, b]
+    plus whatever emission tables Part 2 needs.
+    """
+    raise NotImplementedError("Part 2")
+
+def is_unknown(hmm, token):
+    """True if `token` (raw string) is treated as an unknown word by the HMM."""
+    raise NotImplementedError("Part 2")
+
+def emission_log_probs(hmm, sentence):
+    """(n, T) array of log P(token_i | tag) for a raw token list, using Part 2's smoothing
+    and unknown-word handling. Must be finite everywhere."""
+    raise NotImplementedError("Part 2")
+
+def viterbi(log_init, log_trans, log_emit):
+    """Most likely tag-index sequence (list[int], length n) for (T,), (T, T), (n, T) log-prob arrays."""
+    raise NotImplementedError("Part 2")
+
+def evaluate(gold_tags, pred_tags, unknown_mask):
+    """gold_tags / pred_tags: lists of tag-string lists, unknown_mask: lists of bools (same shape).
+
+    Returns {'all': m, 'unknown': m} where m = {'accuracy', 'precision', 'recall', 'f1'}
+    computed over all tokens and over unknown tokens only.
+    """
+    raise NotImplementedError("Part 2")
+
+# %% [markdown]
+# # Part 3: Embedding-Assisted HMM
+#
+# ## 3.1 Strategy
+#
+# The baseline HMM has almost nothing to go on for an unknown word: one shared unknown-word
+# emission. The idea here is to let each Part 1 representation nominate **known words that could
+# stand in for the unknown one**, and borrow their tag distributions.
+#
+# For an unknown token $x$:
+#
+# 1. **Get a query from the representation.**
+#    - If the normalised form of $x$ is in the Part 1 vocabulary (e.g. `Bancorp` unseen by the
+#      HMM but `bancorp` seen, or any number → `<NUM>`), use its own vector.
+#    - Otherwise $x$ has no vector at all (it never appeared in train), so describe it through
+#      its context words $C$ (same ±2 window as Part 1), each representation in its own way:
+#      - **PMI:** the context words *are* PMI dimensions. Score each known word by the cosine between
+#        its PPMI row and the indicator vector of $C$, i.e. "which words like to appear next to these
+#        words" (first-order, syntagmatic).
+#      - **TF-IDF:** $x$'s missing document vector is approximated by the documents its context words
+#        occur in, so the score of $w$ is $\sum_{c \in C}\cos_\text{tfidf}(w, c)$ (topical relatedness).
+#      - **Word2Vec:** the mean embedding of $C$ is compared with each known word's *average training
+#        context* $\bar{c}_w = \sum_c n(w,c)\,e_c / \sum_c n(w,c)$, so we match the slot, not the
+#        neighbours themselves (averaging $C$ alone would return words similar to "the", "of" ...).
+# 2. **Nearest known words.** Keep the top-$k$ candidates that were seen at least
+#    `MIN_NEIGHBOR_FREQ` times (so their tag distributions are reliable) and weight them by their
+#    (positive) similarity $s_j$:
+#    $\hat P(t \mid x) = (1-\epsilon)\frac{\sum_j s_j P(t \mid w_j)}{\sum_j s_j} + \epsilon P(t)$.
+# 3. **Turn it into an emission score.** By Bayes, $P(x\mid t) \propto P(t\mid x)/P(t)$ (the $P(x)$
+#    factor is the same for every tag, so Viterbi ignores it). This is interpolated log-linearly with
+#    the baseline unknown emission:
+#    $\log e(x,t) = (1-\lambda)\log P_\text{HMM}(x\mid t) + \lambda\,[\log \hat P(t\mid x) - \log P(t)]$.
+#
+# Known words keep their HMM emissions untouched, so all differences between the four systems come
+# from unknown tokens. $k$ and $\lambda$ are tuned per representation on the validation split.
+
+# %%
+hmm = train_hmm(train_sents, train_tags)
+tags = hmm["tags"]
+T = len(tags)
+tag2i = {t: i for i, t in enumerate(tags)}
+
+# P(tag | word) for every Part 1 vocabulary entry, counted on the train split with the same normalise()
+tag_word = np.zeros((v, T))
+for sent, ts in zip(train_sents, train_tags):
+    for w, t in zip(sent, ts):
+        tag_word[word2idx.get(normalise(w), 0), tag2i[t]] += 1
+p_tag_given_word = tag_word / np.maximum(tag_word.sum(1, keepdims=True), 1)
+tag_prior = (tag_word.sum(0) + 1) / (tag_word.sum() + T)       # add-one so every tag has P(t) > 0
+
+# only words with a trustworthy tag distribution may be borrowed from (unigram[0] = 0 drops <UNK>)
+candidate = unigram >= MIN_NEIGHBOR_FREQ
+print(f"{T} tags | {candidate.sum():,} candidate neighbour words")
+
+def context_ids(sentence, i, window=WINDOW_SIZE):
+    """vocab ids of the known words around position i (unk positions dropped)"""
+    ids = [word2idx.get(normalise(sentence[j]), 0)
+           for j in range(max(0, i - window), min(len(sentence), i + window + 1)) if j != i]
+    return [c for c in ids if c != 0]
+
+# %% [markdown]
+# ### Similarity scorers
+# Each scorer returns a length-`v` score vector over the vocabulary for one query:
+# `self_scores(word_id)` when the token has its own vector, `slot_scores(context_ids)` otherwise.
+
+# %%
+from functools import lru_cache
+
+# ---- PMI: column index of the (row-normalised) PPMI matrix, context -> (words, values) ----
+_cols = defaultdict(lambda: ([], []))
+for w, row in ppmi_rows.items():
+    for c, x in row.items():
+        _cols[c][0].append(w); _cols[c][1].append(x / ppmi_norms[w])
+ppmi_cols = {c: (np.array(ws), np.array(xs)) for c, (ws, xs) in _cols.items()}
+del _cols
+
+def pmi_weighted(weights):
+    """sum_c weights[c] * PPMI_w[c] / |PPMI_w| for every word w"""
+    s = np.zeros(v)
+    for c, wt in weights.items():
+        if c in ppmi_cols:
+            ws, xs = ppmi_cols[c]
+            s[ws] += wt * xs                         # ws has no repeats within one column
+    return s
+
+def pmi_self(q):
+    row = ppmi_rows.get(q, {})
+    n = ppmi_norms.get(q, 0)
+    return pmi_weighted({c: x / n for c, x in row.items()}) if n > 0 else np.zeros(v)
+
+def pmi_slot(ctx):
+    weights = Counter(ctx)
+    n = math.sqrt(sum(x * x for x in weights.values()))
+    return pmi_weighted({c: x / n for c, x in weights.items()})
+
+# ---- TF-IDF: unit-length rows indexed by word and by document ----
+_docs = defaultdict(lambda: ([], []))
+tfidf_unit = {}
+for w, docs in tfidf_rows.items():
+    n = tfidf_norms[w]
+    if n == 0:                                       # word in every sentence -> idf 0, no information
+        continue
+    tfidf_unit[w] = (np.fromiter(docs.keys(), int), np.fromiter(docs.values(), float) / n)
+    for d, x in docs.items():
+        _docs[d][0].append(w); _docs[d][1].append(x / n)
+tfidf_docs = {d: (np.array(ws), np.array(xs)) for d, (ws, xs) in _docs.items()}
+del _docs
+
+@lru_cache(maxsize=4096)
+def tfidf_cos_row(q):
+    """cosine between word q and every word, through the documents q occurs in (float32 to keep the cache small)"""
+    if q not in tfidf_unit:
+        return np.zeros(v, dtype=np.float32)
+    ds, xs = tfidf_unit[q]
+    ws = np.concatenate([tfidf_docs[d][0] for d in ds])
+    vals = np.concatenate([x * tfidf_docs[d][1] for d, x in zip(ds, xs)])
+    return np.bincount(ws, weights=vals, minlength=v).astype(np.float32)
+
+def tfidf_self(q): return tfidf_cos_row(q).astype(float)
+def tfidf_slot(ctx): return np.sum([tfidf_cos_row(c) for c in ctx], axis=0).astype(float)
+
+# ---- Word2Vec: unit embeddings E (from 1.5) and each word's average training context ----
+ctx_centroid = np.zeros_like(E)
+_pairs = np.array([p for p in pair_counts if p[1] != 0])         # unk contexts are dropped at query time too
+_n = np.array([pair_counts[tuple(p)] for p in _pairs], dtype=float)
+for s in range(0, len(_pairs), 200_000):                          # chunked so the (pairs, dim) product stays small
+    p, n = _pairs[s:s + 200_000], _n[s:s + 200_000]
+    np.add.at(ctx_centroid, p[:, 0], n[:, None] * E[p[:, 1]])
+ctx_centroid /= np.maximum(np.linalg.norm(ctx_centroid, axis=1, keepdims=True), 1e-12)
+del _pairs, _n
+
+def w2v_self(q): return E @ E[q]
+def w2v_slot(ctx):
+    m = E[ctx].mean(0)
+    return ctx_centroid @ (m / max(np.linalg.norm(m), 1e-12))
+
+SCORERS = {
+    "PMI":      (pmi_self, pmi_slot),
+    "TF-IDF":   (tfidf_self, tfidf_slot),
+    "Word2Vec": (w2v_self, w2v_slot),
+}
+
+def neighbours(name, sentence, i, k):
+    """top-k candidate words for the unknown token sentence[i] as (ids, scores), best first; None if no query"""
+    self_f, slot_f = SCORERS[name]
+    q = word2idx.get(normalise(sentence[i]), 0)
+    if q != 0:
+        scores = self_f(q)
+    else:
+        ctx = context_ids(sentence, i)
+        if not ctx:
+            return None
+        scores = slot_f(ctx)
+        scores[ctx] = -np.inf                                   # a context word is not a stand-in for the slot
+    scores = np.where(candidate, scores, -np.inf)
+    top = np.argpartition(-scores, k)[:k]
+    top = top[np.argsort(-scores[top])]
+    return top, scores[top]
+
+# quick look: which known words stand in for a few unknown validation tokens
+_shown = 0
+for sent in val_sents:
+    for i, w in enumerate(sent):
+        if _shown < 4 and is_unknown(hmm, w) and word2idx.get(normalise(w), 0) == 0 and context_ids(sent, i):
+            print(f"\n{' '.join(sent[max(0, i - 3):i])} [{w}] {' '.join(sent[i + 1:i + 4])}")
+            for name in SCORERS:
+                print(f"  {name:9}", [idx[j] for j in neighbours(name, sent, i, 6)[0]])
+            _shown += 1
+
+# %% [markdown]
+# ### Integration with the HMM emissions and decoding
+
+# %%
+K_MAX = 50
+EPS = 1e-3
+
+def neighbour_tag_dist(top, scores):
+    """similarity-weighted P(t | x) from the neighbours' tag distributions, None if no positive evidence"""
+    wts = np.maximum(scores, 0)
+    if wts.sum() <= 0:
+        return None
+    dist = wts @ p_tag_given_word[top] / wts.sum()
+    return (1 - EPS) * dist + EPS * tag_prior
+
+def assisted_emission(base_row, dist, lam):
+    emb_row = np.log(dist) - np.log(tag_prior)                 # P(x|t) up to a per-token constant
+    return emb_row if lam == 1 else (1 - lam) * base_row + lam * emb_row
+
+def prepare(sents):
+    """everything that does not depend on k / lambda: baseline emissions, unknown masks, baseline
+    predictions and the top-K_MAX neighbours of every unknown token under each representation"""
+    data = []
+    for sent in sents:
+        if not sent:                                            # the dataset has a few empty sentences
+            data.append({"emit": None, "unk": [], "base": [], "neigh": {name: {} for name in SCORERS}})
+            continue
+        emit = emission_log_probs(hmm, sent)
+        unk = [is_unknown(hmm, w) for w in sent]
+        base_pred = [tags[j] for j in viterbi(hmm["log_init"], hmm["log_trans"], emit)]
+        neigh = {name: {} for name in SCORERS}
+        for i in np.flatnonzero(unk):
+            for name in SCORERS:
+                nb = neighbours(name, sent, i, K_MAX)
+                if nb is not None:
+                    neigh[name][i] = nb
+        data.append({"emit": emit, "unk": unk, "base": base_pred, "neigh": neigh})
+    return data
+
+def decode(data, name=None, k=10, lam=0.5):
+    """tag every sentence; name=None is the baseline HMM. Only sentences with an unknown word are re-decoded."""
+    preds = []
+    for ex in data:
+        nbs = ex["neigh"][name] if name else {}
+        if not nbs:
+            preds.append(ex["base"]); continue
+        emit = ex["emit"].copy()
+        for i, (top, sc) in nbs.items():
+            dist = neighbour_tag_dist(top[:k], sc[:k])
+            if dist is not None:
+                emit[i] = assisted_emission(emit[i], dist, lam)
+        preds.append([tags[j] for j in viterbi(hmm["log_init"], hmm["log_trans"], emit)])
+    return preds
+
+t0 = time.time()
+val_data = prepare(val_sents)
+val_unk = [ex["unk"] for ex in val_data]
+n_unk = sum(map(sum, val_unk))
+print(f"validation: {n_unk:,} unknown tokens ({n_unk / num_val_tokens:.2%}) | prepared in {time.time() - t0:.0f}s")
+
+# %% [markdown]
+# ### Tuning $k$ and $\lambda$ on the validation split
+# Selected by overall validation accuracy (only unknown tokens and their neighbours can change, so this
+# also accounts for knock-on effects through the transitions). The test set is not used here.
+
+# %%
+K_GRID = [1, 5, 10, 20, 50]
+LAM_GRID = [0.25, 0.5, 0.75, 1.0]
+
+best_cfg = {}
+base_val = evaluate(val_tags, decode(val_data), val_unk)
+print(f"baseline   acc {base_val['all']['accuracy']:.4f} | unk acc {base_val['unknown']['accuracy']:.4f}")
+for name in SCORERS:
+    grid = np.zeros((len(K_GRID), len(LAM_GRID)))
+    for a, k in enumerate(K_GRID):
+        for b, lam in enumerate(LAM_GRID):
+            grid[a, b] = evaluate(val_tags, decode(val_data, name, k, lam), val_unk)["all"]["accuracy"]
+    a, b = np.unravel_index(grid.argmax(), grid.shape)
+    best_cfg[name] = (K_GRID[a], LAM_GRID[b])
+    print(f"{name:10} best k={K_GRID[a]:<3} lambda={LAM_GRID[b]:<5} val acc {grid[a, b]:.4f}")
+
+    plt.figure(figsize=(4, 2.8))
+    for b, lam in enumerate(LAM_GRID):
+        plt.plot(K_GRID, grid[:, b], marker="o", label=f"λ={lam}")
+    plt.xscale("log"); plt.xlabel("k"); plt.ylabel("val accuracy"); plt.title(name); plt.legend(fontsize=7)
+    plt.show()
+
+# %% [markdown]
+# ## 3.2 Comparison of the four systems on the test set
+
+# %%
+t0 = time.time()
+test_data = prepare(test_sents)
+test_unk = [ex["unk"] for ex in test_data]
+n_unk = sum(map(sum, test_unk))
+print(f"test: {n_unk:,} unknown tokens ({n_unk / sum(map(len, test_sents)):.2%}) | prepared in {time.time() - t0:.0f}s\n")
+
+test_preds = {"Baseline HMM": decode(test_data)}
+for name, (k, lam) in best_cfg.items():
+    test_preds[f"{name}-assisted"] = decode(test_data, name, k, lam)
+
+results = {sys: evaluate(test_tags, p, test_unk) for sys, p in test_preds.items()}
+cols = ["accuracy", "precision", "recall", "f1"]
+print(f"{'':20}" + "".join(f"{c[:4]:>8}" for c in cols) + "  |" + "".join(f"{'unk ' + c[:4]:>10}" for c in cols))
+for sys, r in results.items():
+    print(f"{sys:20}" + "".join(f"{r['all'][c]:>8.4f}" for c in cols) + "  |"
+          + "".join(f"{r['unknown'][c]:>10.4f}" for c in cols))
+
+# %% [markdown]
+# ## 3.3 Error analysis
+# Unknown tokens where an assisted system disagrees with the baseline: how often it fixes vs. breaks
+# the baseline tag, which gold tags benefit, and a few concrete examples with the borrowed neighbours.
+
+# %%
+base = test_preds["Baseline HMM"]
+gold_unk_tags = Counter(g for gs, us in zip(test_tags, test_unk) for g, u in zip(gs, us) if u)
+top_tags = [t for t, _ in gold_unk_tags.most_common(8)]
+
+def unk_acc_by_tag(preds):
+    hit, tot = Counter(), Counter()
+    for gs, ps, us in zip(test_tags, preds, test_unk):
+        for g, p, u in zip(gs, ps, us):
+            if u:
+                tot[g] += 1; hit[g] += g == p
+    return {t: hit[t] / tot[t] for t in top_tags}
+
+print("unknown-token accuracy by gold tag (most frequent unknown tags)")
+print(f"{'':20}" + "".join(f"{t:>7}" for t in top_tags))
+for sys, p in test_preds.items():
+    acc = unk_acc_by_tag(p)
+    print(f"{sys:20}" + "".join(f"{acc[t]:>7.2f}" for t in top_tags))
+
+for name in SCORERS:
+    preds = test_preds[f"{name}-assisted"]
+    fixed, broken = [], []
+    for s, (sent, gs, bs, ps, us) in enumerate(zip(test_sents, test_tags, base, preds, test_unk)):
+        for i, (g, b, p, u) in enumerate(zip(gs, bs, ps, us)):
+            if u and b != p:
+                (fixed if p == g else broken if b == g else []).append((s, i))
+    print(f"\n=== {name}: fixed {len(fixed)} baseline errors, broke {len(broken)} correct tags ===")
+    k = best_cfg[name][0]
+    for label, cases in (("fixed", fixed[:3]), ("broken", broken[:3])):
+        for s, i in cases:
+            sent = test_sents[s]
+            nb = neighbours(name, sent, i, min(k, 6))
+            nb_str = [idx[j] for j in nb[0]] if nb else []
+            print(f"[{label}] ...{' '.join(sent[max(0, i - 3):i])} [{sent[i]}] {' '.join(sent[i + 1:i + 3])}... "
+                  f"gold={test_tags[s][i]} base={base[s][i]} {name}={preds[s][i]} | neighbours {nb_str}")
+
+# %% [markdown]
+# ### Discussion
+#
+# *(Re-check against the numbers above once Part 2 is in place.)*
+#
+# - **Where the help comes from.** The baseline can only fall back on tag priors (plus whatever
+#   unknown-word model Part 2 uses), so it tends to dump unknown words into the most common open
+#   classes (NN/NNP). Borrowed tag distributions mostly help when the neighbours are *syntactically*
+#   alike, e.g. an unseen verb form after "has" or "to" getting VBN/VB neighbours, or an unseen
+#   capitalised name surrounded by other names.
+# - **PMI (sparse, first-order).** Its slot scores ask "which words appear right next to these
+#   context words", which is close to what a tagger needs: words that fill the same ±2 slot usually
+#   share a POS. It is strongest when the context contains informative function words, and weakest
+#   when the context is itself rare (few non-zero PPMI entries) or the context is only punctuation.
+# - **TF-IDF (sparse, document-level).** Sentences-as-documents capture topic ("stocks, shares,
+#   trading") rather than syntax, so its neighbours mix nouns, verbs and adjectives of the same topic.
+#   It can still lift the noun-ish tags, but it is the most likely to *hurt*, e.g. pushing an unseen
+#   verb towards NN because the sentence is about markets. Worse, punctuation and stopwords occur in
+#   almost every sentence, so their (low-idf but non-zero) rows overlap with *any* context and they
+#   become hubs at the top of the neighbour list in context mode. That is why validation keeps $k$
+#   and $\lambda$ small for TF-IDF: it is mainly useful in the self-vector case.
+# - **Word2Vec (dense).** The context-centroid comparison is smooth: even rare context words have a
+#   meaningful vector, so it degrades gracefully where PMI's rows are empty. On the other hand the
+#   averaging blurs word order (left vs right neighbour), so it confuses tags that differ mostly by
+#   position (e.g. JJ vs NN in "the ___ market", VBD vs VBN).
+# - **Self-vector case.** Tokens whose normalised form is in the vocabulary (case variants, numbers →
+#   `<NUM>`) get very reliable neighbours from all three representations because the word itself is
+#   usually its own top neighbour; most of the "free" gains come from these.
+# - **Tuned λ** reflects how much each representation is trusted: a small λ means the baseline
+#   unknown model was already about as good, a large one means the borrowed distribution dominates.
